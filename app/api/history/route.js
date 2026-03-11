@@ -1,19 +1,4 @@
 import { getWeeklyHistory, saveWeeklyHistory } from "@/lib/db";
-
-export async function GET() {
-  try {
-    return Response.json({ history: getWeeklyHistory() });
-  } catch (e) {
-    return Response.json({ error: e.message }, { status: 500 });
-  }
-}
-
-export async function PUT(request) {
-  try {
-    const { history } = await request.json();
-    saveWeeklyHistory(history);
-    return Response.json({ ok: true });
-  } catch (e) {
-    return Response.json({ error: e.message }, { status: 500 });
-  }
-}
+function g(r){return new URL(r.url).searchParams.get("group")||"thematic";}
+export async function GET(r){try{return Response.json({history:await getWeeklyHistory(g(r))});}catch(e){return Response.json({error:e.message},{status:500});}}
+export async function PUT(r){try{const{history,group}=await r.json();await saveWeeklyHistory(history,group||"thematic");return Response.json({ok:true});}catch(e){return Response.json({error:e.message},{status:500});}}

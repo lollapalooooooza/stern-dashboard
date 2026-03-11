@@ -1,10 +1,2 @@
 import { resetDatabase } from "@/lib/db";
-
-export async function POST() {
-  try {
-    resetDatabase();
-    return Response.json({ ok: true, message: "Database reset to defaults" });
-  } catch (e) {
-    return Response.json({ error: e.message }, { status: 500 });
-  }
-}
+export async function POST(request){try{const body=await request.json().catch(()=>({}));await resetDatabase(body.group||"thematic");return Response.json({ok:true});}catch(e){return Response.json({error:e.message},{status:500});}}
