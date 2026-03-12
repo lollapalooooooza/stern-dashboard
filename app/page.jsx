@@ -214,19 +214,21 @@ function computeHoldings(holdings) {
   const exited = holdings.filter(h => h.status === "exited");
   const totalVal = active.reduce((s, h) => s + (h.currentValue || h.shares * h.currentPrice), 0);
   const totalRealizedPnl = exited.reduce((s, h) => s + (h.realizedPnl || h.pnlFromExcel || 0), 0);
+  // Total cost basis = all active at buy price + all exited cost basis (includes SPY)
+  const totalCostBasis = active.reduce((s, h) => s + h.shares * h.buyPrice, 0) + exited.reduce((s, h) => s + (h.costBasis || h.shares * h.buyPrice || 0), 0);
   const computed = active.map(h => {
     const pv = h.currentValue || h.shares * h.currentPrice;
     const w = totalVal > 0 ? pv / totalVal : 0;
     return { ...h, positionValue: pv, weight: w, pnlPercent: calc.pnlPercent(h.currentPrice, h.buyPrice), pnlDollar: h.pnlFromExcel || calc.pnlDollar(h.currentPrice, h.buyPrice, h.shares) };
   });
-  return { totalVal, active, exited, computed, totalRealizedPnl };
+  return { totalVal, active, exited, computed, totalRealizedPnl, totalCostBasis };
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // OVERVIEW
 // ═══════════════════════════════════════════════════════════════════
 function OverviewPage({ holdings, settings, weeklyHistory }) {
-  const { totalVal, computed, exited, totalRealizedPnl } = computeHoldings(holdings);
+  const { totalVal, computed, exited, totalRealizedPnl, totalCostBasis } = computeHoldings(holdings);
   const unrealizedPnl = computed.reduce((s,h) => s+h.pnlDollar, 0);
   const benchH = computed.find(h => h.theme==="Benchmark");
   const stocksOnly = computed.filter(h => h.theme!=="Benchmark");
@@ -241,12 +243,18 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
   const pnlChart = [...pnlSorted.slice(0,5),...pnlSorted.slice(-5)];
   const tickers = stocksOnly.map(h=>h.ticker);
 
+  // Single source of truth: cumulative return from actual account balances
+  const cumReturn = weeklyHistory.reduce((s,w) => s + w.portfolioReturn, 0);
+  // Starting portfolio value = current value / (1 + cumReturn) — derived from account balances
+  const startingVal = cumReturn !== 0 ? totalVal / (1 + cumReturn) : totalVal;
+  const totalPnlFromBalance = totalVal - startingVal;
+
   return <div className="space-y-6">
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Active: ${fmt.usd(totalVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}`}/>
-      <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(totalVal>0?unrealizedPnl/totalVal:0)} trend={unrealizedPnl>=0?"up":"down"} color={unrealizedPnl>=0?"text-emerald-700":"text-red-600"} icon={TrendingUp} tooltip={`Open positions PnL`}/>
-      <StatCard label="Realized PnL %" value={fmt.pct(exited.reduce((s,h)=>s+(h.costBasis||0),0)>0?totalRealizedPnl/exited.reduce((s,h)=>s+(h.costBasis||0),0):0)} sub={fmt.usd(totalRealizedPnl)} trend={totalRealizedPnl>=0?"up":"down"} color={totalRealizedPnl>=0?"text-emerald-700":"text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nTotal: ${fmt.usd(totalRealizedPnl)}`}/>
-      <StatCard label="Total PnL %" value={fmt.pct(totalVal>0?(unrealizedPnl+totalRealizedPnl)/totalVal:0)} sub={fmt.usd(unrealizedPnl+totalRealizedPnl)} trend={(unrealizedPnl+totalRealizedPnl)>=0?"up":"down"} color={(unrealizedPnl+totalRealizedPnl)>=0?"text-emerald-700":"text-red-600"} icon={BarChart3}/>
+      <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Active: ${fmt.usd(totalVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}\nStarting: ${fmt.usd(startingVal)}`}/>
+      <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(startingVal>0?unrealizedPnl/startingVal:0)} trend={unrealizedPnl>=0?"up":"down"} color={unrealizedPnl>=0?"text-emerald-700":"text-red-600"} icon={TrendingUp} tooltip={`Open positions gain/loss\nvs starting value ${fmt.usd(startingVal)}`}/>
+      <StatCard label="Realized PnL %" value={fmt.pct(startingVal>0?totalRealizedPnl/startingVal:0)} sub={fmt.usd(totalRealizedPnl)} trend={totalRealizedPnl>=0?"up":"down"} color={totalRealizedPnl>=0?"text-emerald-700":"text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nvs starting value ${fmt.usd(startingVal)}`}/>
+      <StatCard label="Total Return" value={fmt.pct(cumReturn)} sub={fmt.usd(totalPnlFromBalance)} trend={cumReturn>=0?"up":"down"} color={cumReturn>=0?"text-emerald-700":"text-red-600"} icon={BarChart3} tooltip={`From account balances\nStart: ${fmt.usd(startingVal)}\nNow: ${fmt.usd(totalVal)}\nMatches cumulative chart`}/>
       <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × β_i)"/>
       <StatCard label="Tracking Error" value={fmt.pct(te)} icon={Activity}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
