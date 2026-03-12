@@ -244,9 +244,9 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
   return <div className="space-y-6">
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
       <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Active: ${fmt.usd(totalVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}`}/>
-      <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} trend={unrealizedPnl>=0?"up":"down"} color={unrealizedPnl>=0?"text-emerald-700":"text-red-600"} icon={TrendingUp} tooltip={`Open positions PnL`}/>
-      <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} trend={totalRealizedPnl>=0?"up":"down"} color={totalRealizedPnl>=0?"text-emerald-700":"text-red-600"} icon={LogOut} tooltip={`From ${exited.length} exited positions`}/>
-      <StatCard label="Total PnL" value={fmt.usd(unrealizedPnl+totalRealizedPnl)} trend={(unrealizedPnl+totalRealizedPnl)>=0?"up":"down"} color={(unrealizedPnl+totalRealizedPnl)>=0?"text-emerald-700":"text-red-600"} icon={BarChart3}/>
+      <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(totalVal>0?unrealizedPnl/totalVal:0)} trend={unrealizedPnl>=0?"up":"down"} color={unrealizedPnl>=0?"text-emerald-700":"text-red-600"} icon={TrendingUp} tooltip={`Open positions PnL`}/>
+      <StatCard label="Realized PnL %" value={fmt.pct(exited.reduce((s,h)=>s+(h.costBasis||0),0)>0?totalRealizedPnl/exited.reduce((s,h)=>s+(h.costBasis||0),0):0)} sub={fmt.usd(totalRealizedPnl)} trend={totalRealizedPnl>=0?"up":"down"} color={totalRealizedPnl>=0?"text-emerald-700":"text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nTotal: ${fmt.usd(totalRealizedPnl)}`}/>
+      <StatCard label="Total PnL %" value={fmt.pct(totalVal>0?(unrealizedPnl+totalRealizedPnl)/totalVal:0)} sub={fmt.usd(unrealizedPnl+totalRealizedPnl)} trend={(unrealizedPnl+totalRealizedPnl)>=0?"up":"down"} color={(unrealizedPnl+totalRealizedPnl)>=0?"text-emerald-700":"text-red-600"} icon={BarChart3}/>
       <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × β_i)"/>
       <StatCard label="Tracking Error" value={fmt.pct(te)} icon={Activity}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
@@ -375,29 +375,57 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
 // RETURNS — attribution from actual PnL, includes realized
 // ═══════════════════════════════════════════════════════════════════
 function ReturnsPage({ holdings, settings, weeklyHistory }) {
-  const { computed, exited } = computeHoldings(holdings);
+  const { computed, exited, totalVal, totalRealizedPnl } = computeHoldings(holdings);
   const themes = [...new Set(computed.map(h=>h.theme))];
-  const basket = themes.map(t=>{const b=computed.filter(h=>h.theme===t);const bw=b.reduce((s,h)=>s+h.weight,0);const br=bw>0?b.reduce((s,h)=>s+h.weight*h.pnlPercent,0)/bw:0;const me=bw>0?b.reduce((s,h)=>s+h.weight*h.marketBeta,0)/bw:0;const mc=me*settings.spyWeeklyReturn;return{theme:t,bw,br,me,mc,al:br-mc};});
-  const pR=computed.reduce((s,h)=>s+h.weight*h.pnlPercent,0);const pME=computed.reduce((s,h)=>s+h.weight*h.marketBeta,0);const pMC=pME*settings.spyWeeklyReturn;const pAl=pR-pMC;const exR=pR-settings.spyWeeklyReturn;
+
+  // Basket attribution from actual holding PnL (includes impact of exits)
+  const totalDeployed = computed.reduce((s,h)=>s+h.positionValue,0) + exited.reduce((s,h)=>s+(h.costBasis||0),0);
+  const totalCurrentVal = computed.reduce((s,h)=>s+h.positionValue,0) + exited.reduce((s,h)=>s+(h.sellTotal||h.currentValue||0),0);
+  const totalPnl = totalCurrentVal - totalDeployed;
+  const totalRetPct = totalDeployed > 0 ? totalPnl / totalDeployed : 0;
+
+  // Basket: include both active and exited positions per theme
+  const allHoldings = [...computed, ...exited.map(h=>({...h, positionValue:h.sellTotal||h.currentValue||0, weight:0, pnlDollar:h.realizedPnl||h.pnlFromExcel||0, pnlPercent:h.realizedPnlPct||(h.costBasis>0?(h.realizedPnl||0)/h.costBasis:0), marketBeta:h.marketBeta||1}))];
+  const allThemes = [...new Set(allHoldings.map(h=>h.theme))];
+  const basket = allThemes.map(t=>{
+    const th = allHoldings.filter(h=>h.theme===t);
+    const deployed = th.reduce((s,h)=>s+(h.costBasis||h.positionValue||0),0);
+    const pnl = th.reduce((s,h)=>s+(h.pnlDollar||0),0);
+    const ret = deployed > 0 ? pnl / deployed : 0;
+    const bw = totalDeployed > 0 ? deployed / totalDeployed : 0;
+    const me = th.length > 0 ? th.reduce((s,h)=>s+(h.marketBeta||1),0)/th.length : 1;
+    const mc = me * (settings.spyWeeklyReturn || 0);
+    return { theme:t, bw, br:ret, pnl, deployed, me, mc, al:ret-mc };
+  });
+
+  // Use cumulative from weekly history (actual account balances)
   const cumData = weeklyHistory.map((w,i)=>({week:w.week,portfolio:weeklyHistory.slice(0,i+1).reduce((s,x)=>s+x.portfolioReturn,0),benchmark:weeklyHistory.slice(0,i+1).reduce((s,x)=>s+x.benchmarkReturn,0)}));
 
+  // Summary stats from actual history
+  const cumPort = weeklyHistory.reduce((s,w)=>s+w.portfolioReturn,0);
+  const cumBench = weeklyHistory.reduce((s,w)=>s+w.benchmarkReturn,0);
+  const excessR = cumPort - cumBench;
+  const portBeta = calc.portfolioBeta(computed);
+  const mktContrib = portBeta * cumBench;
+  const alphaTotal = cumPort - mktContrib;
+
   return <div className="space-y-6">
-    <SectionHeader title="Return Attribution" subtitle="Market · Value · Momentum · Alpha"/>
+    <SectionHeader title="Return Attribution" subtitle="Based on actual account balances"/>
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio Return" value={fmt.pct(pR)} trend={pR>=0?"up":"down"} color={pR>=0?"text-emerald-700":"text-red-600"}/>
-      <StatCard label="Benchmark" value={fmt.pct(settings.spyWeeklyReturn)}/>
-      <StatCard label="Excess Return" value={fmt.pct(exR)} trend={exR>=0?"up":"down"} color={exR>=0?"text-emerald-700":"text-red-600"}/>
-      <StatCard label="Market Contrib" value={fmt.pct(pMC)}/>
-      <StatCard label="Alpha" value={fmt.pct(pAl)} trend={pAl>=0?"up":"down"} color={pAl>=0?"text-emerald-700":"text-red-600"}/>
-      <StatCard label="β Exposure" value={fmt.num(pME)}/>
+      <StatCard label="Cumulative Return" value={fmt.pct(cumPort)} trend={cumPort>=0?"up":"down"} color={cumPort>=0?"text-emerald-700":"text-red-600"} tooltip={`From ${weeklyHistory.length} weeks of data`}/>
+      <StatCard label="Benchmark" value={fmt.pct(cumBench)}/>
+      <StatCard label="Excess Return" value={fmt.pct(excessR)} trend={excessR>=0?"up":"down"} color={excessR>=0?"text-emerald-700":"text-red-600"}/>
+      <StatCard label="Market Contrib" value={fmt.pct(mktContrib)}/>
+      <StatCard label="Alpha" value={fmt.pct(alphaTotal)} trend={alphaTotal>=0?"up":"down"} color={alphaTotal>=0?"text-emerald-700":"text-red-600"}/>
+      <StatCard label="Total PnL" value={fmt.usd(totalPnl)} trend={totalPnl>=0?"up":"down"} color={totalPnl>=0?"text-emerald-700":"text-red-600"}/>
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Cumulative Return</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={cumData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer></Card>
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Attribution</h3><ResponsiveContainer width="100%" height={260}><BarChart data={weeklyHistory}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="marketContrib" stackId="a" fill="#1e3a5f" name="Market"/><Bar dataKey="valueContrib" stackId="a" fill="#2563eb" name="Value"/><Bar dataKey="momentumContrib" stackId="a" fill="#7c3aed" name="Momentum"/><Bar dataKey="alpha" stackId="a" fill="#059669" name="Alpha"/></BarChart></ResponsiveContainer></Card>
     </div>
-    <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Basket-Level Attribution</h3>
-      <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Theme","Weight","Return","β","Mkt Contrib","Alpha"].map(h=><th key={h} className="py-2 px-3 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
-      <tbody>{basket.map(b=><tr key={b.theme} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-3"><ThemeBadge theme={b.theme}/></td><td className="py-2 px-3">{fmt.pct(b.bw,1)}</td><td className={`py-2 px-3 font-medium ${b.br>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(b.br)}</td><td className="py-2 px-3">{fmt.num(b.me)}</td><td className="py-2 px-3">{fmt.pct(b.mc)}</td><td className={`py-2 px-3 font-medium ${b.al>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(b.al)}</td></tr>)}</tbody></table></Card>
+    <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Basket-Level Attribution (Active + Exited)</h3>
+      <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Theme","Deployed","PnL $","Return","Avg β","Mkt Contrib","Alpha"].map(h=><th key={h} className="py-2 px-3 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
+      <tbody>{basket.sort((a,b)=>Math.abs(b.pnl)-Math.abs(a.pnl)).map(b=><tr key={b.theme} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-3"><ThemeBadge theme={b.theme}/></td><td className="py-2 px-3">{fmt.usd(b.deployed)}</td><td className={`py-2 px-3 font-medium ${b.pnl>=0?"text-emerald-600":"text-red-500"}`}>{fmt.usd(b.pnl)}</td><td className={`py-2 px-3 font-medium ${b.br>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(b.br)}</td><td className="py-2 px-3">{fmt.num(b.me)}</td><td className="py-2 px-3">{fmt.pct(b.mc)}</td><td className={`py-2 px-3 font-medium ${b.al>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(b.al)}</td></tr>)}</tbody></table></Card>
   </div>;
 }
 
@@ -408,9 +436,10 @@ function RiskPage({ holdings, settings }) {
   const {computed}=computeHoldings(holdings);const pb=calc.portfolioBeta(computed);
   const sv=calc.systematicVol(pb,settings.benchmarkVol);const iv=calc.idiosyncraticVol(settings.portfolioVol,sv);const te=calc.trackingError(pb,settings.benchmarkVol,iv);
   const themes=[...new Set(computed.map(h=>h.theme))];
-  const themeRisk=themes.map((t,i)=>{const th=computed.filter(h=>h.theme===t);const tw=th.reduce((s,h)=>s+h.weight,0);const wb=th.reduce((s,h)=>s+h.weight*h.marketBeta,0);return{theme:t,weight:tw,avgBeta:tw>0?wb/tw:0,riskContrib:pb>0?wb/pb:0,fill:getThemeColor(t,i)};});
+  const themeRisk=themes.map((t,i)=>{const th=computed.filter(h=>h.theme===t);const tw=th.reduce((s,h)=>s+h.weight,0);const wb=th.reduce((s,h)=>s+h.weight*h.marketBeta,0);return{theme:t,weight:tw,avgBeta:tw>0?wb/tw:0,riskContrib:pb>0?wb/pb:0,weightedRisk:tw>0?(pb>0?wb/pb:0)/tw:0,fill:getThemeColor(t,i)};});
   const maxSW=Math.max(...computed.map(h=>h.weight));const spyW=computed.find(h=>h.ticker==="SPY")?.weight||0;
   const checks=[{metric:"Daily VaR 95%",current:calc.dailyVaR95(settings.portfolioVol),limit:settings.limits.dailyVaR95},{metric:"Tracking Error",current:te,limit:settings.limits.trackingError},{metric:"Beta Deviation",current:Math.abs(pb-1),limit:settings.limits.betaDeviation},{metric:"Systematic Vol",current:sv,limit:settings.limits.systematicVol},{metric:"Max Stock Weight",current:maxSW,limit:settings.limits.maxStockWeight},{metric:"S&P Weight",current:spyW,limit:settings.limits.spyWeight}].map(c=>({...c,utilization:calc.utilization(c.current,c.limit),status:calc.complianceStatus(c.current,c.limit),headroom:c.limit-c.current}));
+  const [showWeighted, setShowWeighted] = useState(false);
 
   return <div className="space-y-6">
     <SectionHeader title="Risk Analytics"/>
@@ -421,8 +450,16 @@ function RiskPage({ holdings, settings }) {
       <table className="w-full text-sm"><thead><tr className="bg-slate-50 border-b">{["Metric","Current","Limit","Utilization","Status"].map(h=><th key={h} className="py-2.5 px-3 text-left text-xs font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
       <tbody>{checks.map(c=><tr key={c.metric} className="border-b hover:bg-slate-50"><td className="py-2.5 px-3 font-semibold text-slate-700">{c.metric}</td><td className="py-2.5 px-3">{fmt.pct(c.current)}</td><td className="py-2.5 px-3 text-slate-500">{fmt.pct(c.limit)}</td><td className="py-2.5 px-3"><div className="flex items-center gap-2"><div className="flex-1 bg-slate-100 rounded-full h-2 max-w-[120px]"><div className="h-2 rounded-full" style={{width:`${Math.min(c.utilization*100,100)}%`,backgroundColor:statusBg(c.status)}}/></div><span className="text-xs font-medium">{fmt.pct(c.utilization,0)}</span></div></td><td className="py-2.5 px-3"><Badge status={c.status}/></td></tr>)}</tbody></table></Card>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Risk by Theme</h3><ResponsiveContainer width="100%" height={280}><BarChart data={themeRisk}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="theme" tick={{fontSize:9}}/><YAxis tickFormatter={v=>fmt.pct(v,0)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Bar dataKey="riskContrib" name="Risk %" radius={[4,4,0,0]}>{themeRisk.map((e,i)=><Cell key={i} fill={e.fill}/>)}</Bar></BarChart></ResponsiveContainer></Card>
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Theme Risk Profile</h3><table className="w-full text-xs"><thead><tr className="border-b">{["Theme","Weight","Avg β","Risk %"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500">{h}</th>)}</tr></thead><tbody>{themeRisk.map(t=><tr key={t.theme} className="border-b border-slate-100"><td className="py-1.5 px-2"><ThemeBadge theme={t.theme}/></td><td className="py-1.5 px-2">{fmt.pct(t.weight,1)}</td><td className="py-1.5 px-2">{fmt.num(t.avgBeta)}</td><td className="py-1.5 px-2">{fmt.pct(t.riskContrib,1)}</td></tr>)}</tbody></table></Card>
+      <Card className="p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-700">{showWeighted ? "Weighted Risk (Risk/Weight)" : "Risk by Theme"}</h3>
+          <button onClick={()=>setShowWeighted(!showWeighted)} className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-all ${showWeighted ? "bg-slate-800 text-white border-slate-800" : "text-slate-600 border-slate-300 hover:bg-slate-50"}`}>
+            <ArrowRightLeft size={12}/> {showWeighted ? "Show Absolute" : "Show Risk/Weight"}
+          </button>
+        </div>
+        <ResponsiveContainer width="100%" height={280}><BarChart data={themeRisk}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="theme" tick={{fontSize:9}}/><YAxis tickFormatter={v=>showWeighted?fmt.num(v):fmt.pct(v,0)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>showWeighted?fmt.num(v):fmt.pct(v)}/>}/><Bar dataKey={showWeighted?"weightedRisk":"riskContrib"} name={showWeighted?"Risk/Weight":"Risk %"} radius={[4,4,0,0]}>{themeRisk.map((e,i)=><Cell key={i} fill={e.fill}/>)}</Bar></BarChart></ResponsiveContainer>
+      </Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Theme Risk Profile</h3><table className="w-full text-xs"><thead><tr className="border-b">{["Theme","Weight","Avg β","Risk %","Risk/Weight"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500">{h}</th>)}</tr></thead><tbody>{themeRisk.map(t=><tr key={t.theme} className="border-b border-slate-100"><td className="py-1.5 px-2"><ThemeBadge theme={t.theme}/></td><td className="py-1.5 px-2">{fmt.pct(t.weight,1)}</td><td className="py-1.5 px-2">{fmt.num(t.avgBeta)}</td><td className="py-1.5 px-2">{fmt.pct(t.riskContrib,1)}</td><td className="py-1.5 px-2 font-semibold">{fmt.num(t.weightedRisk)}</td></tr>)}</tbody></table></Card>
     </div>
   </div>;
 }
