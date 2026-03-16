@@ -36,6 +36,12 @@ interface Props {
   holdings: Holding[];
 }
 
+const RANGE_PRESETS = [
+  "What's driving the price movement?",
+  'Summarize key news in this period',
+  'What are the bull/bear factors?',
+];
+
 export default function CatalystPage({ holdings }: Props) {
   const [activeTickers, setActiveTickers] = useState<string[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
@@ -60,21 +66,16 @@ export default function CatalystPage({ holdings }: Props) {
   const [tickerLoadingMessage, setTickerLoadingMessage] = useState('');
   const [predView, setPredView] = useState<'prediction' | 'ask'>('prediction');
   const [customRangeQuestion, setCustomRangeQuestion] = useState('');
-  const [watchlist, setWatchlist] = useState<string[]>([]);
+
+  const [watchlist, setWatchlist] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('ct-watchlist') || '[]');
+    } catch {
+      return [];
+    }
+  });
 
   const chartAreaRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    try {
-      setWatchlist(JSON.parse(localStorage.getItem('ct-watchlist') || '[]'));
-    } catch {
-      setWatchlist([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem('ct-watchlist', JSON.stringify(watchlist));
-  }, [watchlist]);
 
   const tickerGroups = useMemo(() => {
     const groups: Record<string, string[]> = {};
@@ -86,13 +87,18 @@ export default function CatalystPage({ holdings }: Props) {
     return Object.keys(groups).length > 0 ? groups : undefined;
   }, [holdings]);
 
+  useEffect(() => {
+    localStorage.setItem('ct-watchlist', JSON.stringify(watchlist));
+  }, [watchlist]);
+
   const toggleWatchlist = useCallback((sym: string) => {
     setWatchlist((prev) => (prev.includes(sym) ? prev.filter((s) => s !== sym) : [...prev, sym]));
   }, []);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       if (e.key === 'Escape') {
         if (selectedRange) {
           setSelectedRange(null);
@@ -136,7 +142,7 @@ export default function CatalystPage({ holdings }: Props) {
           if (!selectedSymbol) setSelectedSymbol(holdingTickers[0]);
         }
       });
-  }, [holdings, selectedSymbol]);
+  }, [holdings]);
 
   const handleHover = useCallback(
     (date: string | null, ohlc?: { date: string; open: number; high: number; low: number; close: number; change: number }) => {
@@ -251,6 +257,7 @@ export default function CatalystPage({ holdings }: Props) {
     if (!activeTickers.includes(symbol)) {
       setActiveTickers((prev) => [...prev, symbol]);
       setSelectedSymbol(symbol);
+      setPredView('prediction');
       catalystApi.post('stocks', { symbol }).catch(console.error);
       await waitForTickerReady(symbol);
     }
@@ -260,6 +267,21 @@ export default function CatalystPage({ holdings }: Props) {
   const isLocked = lockedArticle !== null;
 
   function renderRightPanel() {
+    if (selectedRange && rangeQuestion) {
+      return (
+        <RangeAnalysisPanel
+          symbol={selectedSymbol}
+          startDate={selectedRange.startDate}
+          endDate={selectedRange.endDate}
+          question={rangeQuestion}
+          onClear={() => {
+            setSelectedRange(null);
+            setRangeQuestion(null);
+            setPredView('prediction');
+          }}
+        />
+      );
+    }
     if (selectedRange && !rangeQuestion) {
       return (
         <RangeNewsPanel
@@ -276,13 +298,7 @@ export default function CatalystPage({ holdings }: Props) {
       );
     }
     if (selectedDay) {
-      return (
-        <SimilarDaysPanel
-          symbol={selectedSymbol}
-          date={selectedDay}
-          onClose={() => setSelectedDay(null)}
-        />
-      );
+      return <SimilarDaysPanel symbol={selectedSymbol} date={selectedDay} onClose={() => setSelectedDay(null)} />;
     }
     return (
       <NewsPanel
@@ -324,6 +340,7 @@ export default function CatalystPage({ holdings }: Props) {
                 <span className="brand-subtext">Event-driven research workspace</span>
               </div>
             </div>
+
             <StockSelector
               activeTickers={activeTickers}
               selectedSymbol={selectedSymbol}
@@ -333,6 +350,7 @@ export default function CatalystPage({ holdings }: Props) {
               onToggleWatchlist={toggleWatchlist}
               groups={tickerGroups}
             />
+
             {selectedRange ? (
               <div className="header-ohlc">
                 <span className="ohlc-date">{selectedRange.startDate} ~ {selectedRange.endDate}</span>
@@ -341,12 +359,17 @@ export default function CatalystPage({ holdings }: Props) {
             ) : hoveredOhlc ? (
               <div className="header-ohlc">
                 <span className="ohlc-date">{hoveredOhlc.date}</span>
-                <span className="ohlc-label">O</span><span className="ohlc-val">${hoveredOhlc.open.toFixed(2)}</span>
-                <span className="ohlc-label">H</span><span className="ohlc-val">${hoveredOhlc.high.toFixed(2)}</span>
-                <span className="ohlc-label">L</span><span className="ohlc-val">${hoveredOhlc.low.toFixed(2)}</span>
-                <span className="ohlc-label">C</span><span className="ohlc-val">${hoveredOhlc.close.toFixed(2)}</span>
+                <span className="ohlc-label">O</span>
+                <span className="ohlc-val">${hoveredOhlc.open.toFixed(2)}</span>
+                <span className="ohlc-label">H</span>
+                <span className="ohlc-val">${hoveredOhlc.high.toFixed(2)}</span>
+                <span className="ohlc-label">L</span>
+                <span className="ohlc-val">${hoveredOhlc.low.toFixed(2)}</span>
+                <span className="ohlc-label">C</span>
+                <span className="ohlc-val">${hoveredOhlc.close.toFixed(2)}</span>
                 <span className={`ohlc-change ${hoveredOhlc.change >= 0 ? 'up' : 'down'}`}>
-                  {hoveredOhlc.change >= 0 ? '+' : ''}{hoveredOhlc.change.toFixed(2)}%
+                  {hoveredOhlc.change >= 0 ? '+' : ''}
+                  {hoveredOhlc.change.toFixed(2)}%
                 </span>
               </div>
             ) : null}
@@ -359,17 +382,27 @@ export default function CatalystPage({ holdings }: Props) {
               <span className="range-status-pill">Range Mode Active</span>
               <span className="range-status-dates">{selectedRange.startDate} → {selectedRange.endDate}</span>
               <span className={`range-change ${(selectedRange.priceChange ?? 0) >= 0 ? 'up' : 'down'}`}>
-                {(selectedRange.priceChange ?? 0) >= 0 ? '+' : ''}{(selectedRange.priceChange ?? 0).toFixed(2)}%
+                {(selectedRange.priceChange ?? 0) >= 0 ? '+' : ''}
+                {(selectedRange.priceChange ?? 0).toFixed(2)}%
               </span>
             </div>
             <div className="range-status-actions">
-              <button className={`range-mode-btn ${predView === 'prediction' ? 'active' : ''}`} onClick={() => setPredView('prediction')}>Prediction</button>
-              <button className={`range-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => setPredView('ask')}>AI Question</button>
-              <button className="range-exit-btn" onClick={() => {
-                setSelectedRange(null);
-                setRangeQuestion(null);
-                setPredView('prediction');
-              }}>Exit Range</button>
+              <button className={`range-mode-btn ${predView === 'prediction' ? 'active' : ''}`} onClick={() => setPredView('prediction')}>
+                Prediction
+              </button>
+              <button className={`range-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => setPredView('ask')}>
+                AI Question
+              </button>
+              <button
+                className="range-exit-btn"
+                onClick={() => {
+                  setSelectedRange(null);
+                  setRangeQuestion(null);
+                  setPredView('prediction');
+                }}
+              >
+                Exit Range
+              </button>
             </div>
           </div>
         )}
@@ -414,23 +447,24 @@ export default function CatalystPage({ holdings }: Props) {
                         <div className="pred-ask-title">Ask AI about selected range</div>
                         <div className="pred-ask-meta">{selectedRange.startDate} ~ {selectedRange.endDate}</div>
                       </div>
-                      <span className={`range-change ${((selectedRange.priceChange ?? 0) >= 0) ? 'up' : 'down'}`}>
-                        {((selectedRange.priceChange ?? 0) >= 0) ? '+' : ''}{(selectedRange.priceChange ?? 0).toFixed(2)}%
+                      <span className={`range-change ${(selectedRange.priceChange ?? 0) >= 0 ? 'up' : 'down'}`}>
+                        {(selectedRange.priceChange ?? 0) >= 0 ? '+' : ''}{(selectedRange.priceChange ?? 0).toFixed(2)}%
                       </span>
                     </div>
                     <div className="pred-ask-presets">
-                      {[
-                        "What's driving the price movement?",
-                        'Summarize key news in this period',
-                        'What are the bull/bear factors?',
-                      ].map((q) => (
-                        <button key={q} className="pred-ask-preset" onClick={() => handleRangeAsk(q)}>{q}</button>
+                      {RANGE_PRESETS.map((q) => (
+                        <button key={q} className="pred-ask-preset" onClick={() => handleRangeAsk(q)}>
+                          {q}
+                        </button>
                       ))}
                     </div>
-                    <form className="pred-ask-form" onSubmit={(e) => {
-                      e.preventDefault();
-                      if (customRangeQuestion.trim()) handleRangeAsk(customRangeQuestion.trim());
-                    }}>
+                    <form
+                      className="pred-ask-form"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (customRangeQuestion.trim()) handleRangeAsk(customRangeQuestion.trim());
+                      }}
+                    >
                       <input
                         value={customRangeQuestion}
                         onChange={(e) => setCustomRangeQuestion(e.target.value)}
@@ -452,11 +486,7 @@ export default function CatalystPage({ holdings }: Props) {
             ) : (
               <>
                 {selectedSymbol && !selectedRange && (
-                  <NewsCategoryPanel
-                    symbol={selectedSymbol}
-                    activeCategory={activeCategory}
-                    onCategoryChange={handleCategoryChange}
-                  />
+                  <NewsCategoryPanel symbol={selectedSymbol} activeCategory={activeCategory} onCategoryChange={handleCategoryChange} />
                 )}
                 {renderRightPanel()}
               </>
