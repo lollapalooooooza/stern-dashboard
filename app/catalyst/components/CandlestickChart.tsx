@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { catalystApi } from '../api';
 
@@ -69,40 +69,43 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
   const [loading, setLoading] = useState(false);
   const [rawOhlc, setRawOhlc] = useState<OHLCRow[]>([]);
   const [rawParticles, setRawParticles] = useState<Particle[]>([]);
-  const [viewSize, setViewSize] = useState(140);
-  const [viewEnd, setViewEnd] = useState<number | null>(null);
+  const [viewStart, setViewStart] = useState(0);
+  const [viewCount, setViewCount] = useState<number | null>(null);
 
   useEffect(() => {
     if (!symbol) return;
     setLoading(true);
-    setViewSize(140);
-    setViewEnd(null);
+    setViewCount(null);
+    setViewStart(0);
 
     Promise.all([
       catalystApi.get<OHLCRow[]>(`stocks/${symbol}/ohlc`),
       catalystApi.get<Particle[]>(`news/${symbol}/particles`),
     ])
       .then(([ohlcRes, particlesRes]) => {
-        setRawOhlc(ohlcRes.data || []);
+        const nextOhlc = ohlcRes.data || [];
+        setRawOhlc(nextOhlc);
         setRawParticles(particlesRes.data || []);
+        setViewCount(nextOhlc.length || null);
+        setViewStart(0);
       })
       .catch((err) => console.error('Chart error:', err))
       .finally(() => setLoading(false));
   }, [symbol]);
 
+  const visibleOhlc = useMemo(() => {
+    if (!rawOhlc.length) return [];
+    const count = viewCount ?? rawOhlc.length;
+    return rawOhlc.slice(viewStart, viewStart + count);
+  }, [rawOhlc, viewStart, viewCount]);
+
   useEffect(() => {
-    if (!rawOhlc.length) return;
-    const total = rawOhlc.length;
-    const safeView = Math.min(viewSize, total);
-    const end = Math.max(safeView, Math.min(viewEnd ?? total, total));
-    const start = Math.max(0, end - safeView);
-    const sliced = rawOhlc.slice(start, end);
-    const startDate = sliced[0]?.date;
-    const endDate = sliced[sliced.length - 1]?.date;
+    if (!visibleOhlc.length) return;
+    const startDate = visibleOhlc[0]?.date;
+    const endDate = visibleOhlc[visibleOhlc.length - 1]?.date;
     const filteredParticles = rawParticles.filter((p) => (!startDate || p.d >= startDate) && (!endDate || p.d <= endDate));
-    drawChart(sliced, filteredParticles);
-    if (viewEnd !== end) setViewEnd(end);
-  }, [rawOhlc, rawParticles, viewSize, viewEnd, lockedNewsId, highlightedArticleIds, highlightColor]);
+    drawChart(visibleOhlc, filteredParticles);
+  }, [visibleOhlc, rawParticles, lockedNewsId, highlightedArticleIds, highlightColor]);
 
   function drawChart(rawData: OHLCRow[], particles: Particle[]) {
     const svgEl = svgRef.current;
@@ -261,29 +264,49 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       });
   }
 
-  const canPanLeft = viewEnd !== null && viewEnd - viewSize > 0;
-  const canPanRight = viewEnd !== null && rawOhlc.length > 0 && viewEnd < rawOhlc.length;
-  const maxEnd = rawOhlc.length || 1;
+  const total = rawOhlc.length;
+  const currentCount = viewCount ?? total;
+  const canPanLeft = viewStart > 0;
+  const canPanRight = total > 0 && viewStart + currentCount < total;
+
+  function handleZoomIn() {
+    if (total <= 1) return;
+    const minCount = Math.min(20, total);
+    const nextCount = Math.max(minCount, Math.floor(currentCount * 0.7));
+    const center = viewStart + currentCount / 2;
+    const maxStart = Math.max(0, total - nextCount);
+    setViewCount(nextCount);
+    setViewStart(Math.max(0, Math.min(maxStart, Math.round(center - nextCount / 2))));
+  }
+
+  function handleZoomOut() {
+    if (total <= 1) return;
+    const nextCount = Math.min(total, Math.ceil(currentCount / 0.7));
+    const center = viewStart + currentCount / 2;
+    const maxStart = Math.max(0, total - nextCount);
+    setViewCount(nextCount);
+    setViewStart(Math.max(0, Math.min(maxStart, Math.round(center - nextCount / 2))));
+  }
+
+  function handlePan(direction: -1 | 1) {
+    const step = Math.max(1, Math.floor(currentCount * 0.4));
+    const maxStart = Math.max(0, total - currentCount);
+    setViewStart((prev) => Math.max(0, Math.min(maxStart, prev + direction * step)));
+  }
+
+  function handleReset() {
+    setViewCount(total || null);
+    setViewStart(0);
+  }
 
   return (
     <div ref={containerRef} className="chart-container">
       <div className="chart-toolbar">
-        <div className="chart-toolbar-group chart-toolbar-group-terminal">
-          <button className="chart-tool-btn" title="Zoom out" onClick={() => setViewSize((s) => Math.min(rawOhlc.length || s, s + 30))}>
-            <span className="chart-tool-icon">－</span><span className="chart-tool-label">Zoom Out</span>
-          </button>
-          <button className="chart-tool-btn" title="Zoom in" onClick={() => setViewSize((s) => Math.max(40, s - 30))}>
-            <span className="chart-tool-icon">＋</span><span className="chart-tool-label">Zoom In</span>
-          </button>
-        </div>
-        <div className="chart-toolbar-group chart-toolbar-group-terminal">
-          <button className="chart-tool-btn" title="Pan earlier" disabled={!canPanLeft} onClick={() => setViewEnd((v) => v === null ? v : Math.max(viewSize, v - 30))}>
-            <span className="chart-tool-icon">←</span><span className="chart-tool-label">Earlier</span>
-          </button>
-          <button className="chart-tool-btn" title="Pan later" disabled={!canPanRight} onClick={() => setViewEnd((v) => v === null ? v : Math.min(rawOhlc.length, v + 30))}>
-            <span className="chart-tool-label">Later</span><span className="chart-tool-icon">→</span>
-          </button>
-        </div>
+        <button className="chart-toolbar-btn" onClick={handleZoomIn} title="Zoom in">＋</button>
+        <button className="chart-toolbar-btn" onClick={handleZoomOut} title="Zoom out">－</button>
+        <button className="chart-toolbar-btn" onClick={() => handlePan(-1)} title="Pan left" disabled={!canPanLeft}>←</button>
+        <button className="chart-toolbar-btn" onClick={() => handlePan(1)} title="Pan right" disabled={!canPanRight}>→</button>
+        <button className="chart-toolbar-btn chart-toolbar-btn-reset" onClick={handleReset} title="Reset view">Reset</button>
       </div>
       {loading && (
         <div className="chart-loading-skeleton">
@@ -302,11 +325,11 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
         <input
           className="chart-timeline-slider"
           type="range"
-          min={Math.min(viewSize, maxEnd)}
-          max={maxEnd}
+          min={0}
+          max={Math.max(0, total - currentCount)}
           step={1}
-          value={viewEnd ?? maxEnd}
-          onChange={(e) => setViewEnd(Number(e.target.value))}
+          value={Math.min(viewStart, Math.max(0, total - currentCount))}
+          onChange={(e) => setViewStart(Number(e.target.value))}
         />
         <div className="chart-timeline-labels">
           <span>Earlier</span>
