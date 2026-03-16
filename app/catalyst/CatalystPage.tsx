@@ -57,6 +57,8 @@ export default function CatalystPage({ holdings }: Props) {
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [activeCategoryIds, setActiveCategoryIds] = useState<string[]>([]);
   const [activeCategoryColor, setActiveCategoryColor] = useState<string | null>(null);
+  const [tickerLoading, setTickerLoading] = useState(false);
+  const [tickerLoadingMessage, setTickerLoadingMessage] = useState('');
 
   const [watchlist, setWatchlist] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('ct-watchlist') || '[]'); } catch { return []; }
@@ -212,10 +214,35 @@ export default function CatalystPage({ holdings }: Props) {
     setActiveCategoryColor(null);
   }
 
-  function handleAddTicker(symbol: string) {
+  async function waitForTickerReady(symbol: string) {
+    setTickerLoading(true);
+    setTickerLoadingMessage(`Fetching ${symbol} market data...`);
+    for (let i = 0; i < 24; i++) {
+      try {
+        const res = await catalystApi.get(`stocks/${symbol}/status`);
+        const status = res.data;
+        if (status.has_ohlc) {
+          setTickerLoading(false);
+          setTickerLoadingMessage('');
+          return true;
+        }
+        if (status.has_news || status.has_aligned_news) {
+          setTickerLoadingMessage(`Preparing ${symbol} news timeline...`);
+        }
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    setTickerLoading(false);
+    setTickerLoadingMessage('');
+    return false;
+  }
+
+  async function handleAddTicker(symbol: string) {
     if (!activeTickers.includes(symbol)) {
       setActiveTickers((prev) => [...prev, symbol]);
+      setSelectedSymbol(symbol);
       catalystApi.post('stocks', { symbol }).catch(console.error);
+      await waitForTickerReady(symbol);
     }
   }
 
@@ -362,14 +389,20 @@ export default function CatalystPage({ holdings }: Props) {
             </div>
           )}
           <div className="news-area">
-            {selectedSymbol && (
-              <NewsCategoryPanel
-                symbol={selectedSymbol}
-                activeCategory={activeCategory}
-                onCategoryChange={handleCategoryChange}
-              />
+            {tickerLoading ? (
+              <div className="news-empty">Preparing news for {selectedSymbol}...</div>
+            ) : (
+              <>
+                {selectedSymbol && (
+                  <NewsCategoryPanel
+                    symbol={selectedSymbol}
+                    activeCategory={activeCategory}
+                    onCategoryChange={handleCategoryChange}
+                  />
+                )}
+                {renderRightPanel()}
+              </>
             )}
-            {renderRightPanel()}
           </div>
         </main>
         <ToastContainer />
@@ -377,3 +410,4 @@ export default function CatalystPage({ holdings }: Props) {
     </div>
   );
 }
+
