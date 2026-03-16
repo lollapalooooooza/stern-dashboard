@@ -497,20 +497,8 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .on('end', function (event) {
         if (brushMoving) return; // guard against re-entrancy from brush.move
         if (!event.selection) {
-          // Click (not drag) — find similar days or toggle lock
-          if (event.sourceEvent) {
-            const [mx] = d3.pointer(event.sourceEvent, g.node());
-            const d = snapToData(mx);
-            const [absX, absY] = d3.pointer(event.sourceEvent, container);
-            const hit = findParticle(absX, absY);
-            if (hit) {
-              onArticleSelect?.({ newsId: hit.id, date: hit.d });
-            } else {
-              // Click on background: unlock any locked article, then show similar days
-              onArticleSelect?.(null);
-              onDayClick?.(d.dateStr);
-            }
-          }
+          // Ignore plain clicks after a range was already selected; keep the current range
+          // until the user explicitly clears it from the side panels.
           return;
         }
         const [x0, x1] = event.selection as [number, number];

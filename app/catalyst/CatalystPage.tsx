@@ -474,7 +474,7 @@ export default function CatalystPage({ holdings }: Props) {
               <div className="news-empty">Preparing news for {selectedSymbol}...</div>
             ) : (
               <>
-                {selectedSymbol && (
+                {selectedSymbol && !selectedRange && (
                   <NewsCategoryPanel
                     symbol={selectedSymbol}
                     activeCategory={activeCategory}
