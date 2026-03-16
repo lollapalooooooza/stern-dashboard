@@ -16,6 +16,7 @@ interface RangeAnalysis {
   news_count: number;
   trading_days: number;
   question?: string;
+  analysis_mode?: 'ai' | 'local' | string;
   analysis: {
     summary: string;
     key_events: string[];
