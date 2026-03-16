@@ -189,12 +189,14 @@
   align-items: center;
 }
 
+.catalyst-wrapper .brand-stack { display: flex; flex-direction: column; line-height: 1.1; }
 .catalyst-wrapper .brand-text {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--text-white);
-  letter-spacing: -0.5px;
+  letter-spacing: -0.3px;
 }
+.catalyst-wrapper .brand-subtext { font-size: 11px; color: var(--text-dim); }
 
 .catalyst-wrapper .header-ohlc {
   display: flex;
@@ -255,6 +257,40 @@
 }
 
 /* ===== Header Range Badge ===== */
+.catalyst-wrapper .range-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-primary);
+  background: linear-gradient(180deg, rgba(102,126,234,0.08), rgba(102,126,234,0.03));
+}
+.catalyst-wrapper .range-status-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.catalyst-wrapper .range-status-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(102,126,234,0.16);
+  color: #cfd8ff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.catalyst-wrapper .range-status-dates { color: var(--text-secondary); font-family: var(--font-mono); font-size: 13px; }
+.catalyst-wrapper .range-status-actions { display: flex; align-items: center; gap: 8px; }
+.catalyst-wrapper .range-mode-btn, .catalyst-wrapper .range-exit-btn {
+  border: 1px solid var(--border-card);
+  background: rgba(255,255,255,0.03);
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  padding: 7px 11px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.catalyst-wrapper .range-mode-btn.active { border-color: var(--accent); color: #eef2ff; background: rgba(102,126,234,0.12); }
+.catalyst-wrapper .range-exit-btn:hover { border-color: var(--red); color: var(--red); }
+
 .catalyst-wrapper .range-badge {
   background: var(--accent);
   color: var(--text-white);

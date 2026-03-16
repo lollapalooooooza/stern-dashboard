@@ -6,7 +6,6 @@ import CandlestickChart from './components/CandlestickChart';
 import NewsPanel from './components/NewsPanel';
 import NewsCategoryPanel from './components/NewsCategoryPanel';
 import RangeAnalysisPanel from './components/RangeAnalysisPanel';
-import RangeQueryPopup from './components/RangeQueryPopup';
 import RangeNewsPanel from './components/RangeNewsPanel';
 import SimilarDaysPanel from './components/SimilarDaysPanel';
 import PredictionPanel from './components/PredictionPanel';
@@ -61,44 +60,50 @@ export default function CatalystPage({ holdings }: Props) {
   const [tickerLoadingMessage, setTickerLoadingMessage] = useState('');
   const [predView, setPredView] = useState<'prediction' | 'ask'>('prediction');
   const [customRangeQuestion, setCustomRangeQuestion] = useState('');
-
-  const [watchlist, setWatchlist] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('ct-watchlist') || '[]'); } catch { return []; }
-  });
+  const [watchlist, setWatchlist] = useState<string[]>([]);
 
   const chartAreaRef = useRef<HTMLDivElement>(null);
-  const [chartRect, setChartRect] = useState<DOMRect | undefined>(undefined);
 
-  // Derive ticker groups from holdings by subTheme
+  useEffect(() => {
+    try {
+      setWatchlist(JSON.parse(localStorage.getItem('ct-watchlist') || '[]'));
+    } catch {
+      setWatchlist([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('ct-watchlist', JSON.stringify(watchlist));
+  }, [watchlist]);
+
   const tickerGroups = useMemo(() => {
     const groups: Record<string, string[]> = {};
     for (const h of holdings) {
       const key = h.subTheme || h.theme || 'Other';
       if (!groups[key]) groups[key] = [];
-      if (!groups[key].includes(h.ticker)) {
-        groups[key].push(h.ticker);
-      }
+      if (!groups[key].includes(h.ticker)) groups[key].push(h.ticker);
     }
     return Object.keys(groups).length > 0 ? groups : undefined;
   }, [holdings]);
 
-  // Persist watchlist
-  useEffect(() => {
-    localStorage.setItem('ct-watchlist', JSON.stringify(watchlist));
-  }, [watchlist]);
-
   const toggleWatchlist = useCallback((sym: string) => {
-    setWatchlist(prev => prev.includes(sym) ? prev.filter(s => s !== sym) : [...prev, sym]);
+    setWatchlist((prev) => (prev.includes(sym) ? prev.filter((s) => s !== sym) : [...prev, sym]));
   }, []);
 
-  // Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
       if (e.key === 'Escape') {
-        if (selectedRange) { setSelectedRange(null); setRangeQuestion(null); }
-        else if (lockedArticle) { setLockedArticle(null); setSelectedArticle(null); }
-        else if (selectedDay) { setSelectedDay(null); }
+        if (selectedRange) {
+          setSelectedRange(null);
+          setRangeQuestion(null);
+          setPredView('prediction');
+        } else if (lockedArticle) {
+          setLockedArticle(null);
+          setSelectedArticle(null);
+        } else if (selectedDay) {
+          setSelectedDay(null);
+        }
       }
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
@@ -109,7 +114,6 @@ export default function CatalystPage({ holdings }: Props) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedRange, lockedArticle, selectedDay]);
 
-  // Fetch active tickers from backend + merge with holdings tickers
   useEffect(() => {
     catalystApi
       .get('stocks')
@@ -117,38 +121,26 @@ export default function CatalystPage({ holdings }: Props) {
         const backendTickers: string[] = res.data
           .filter((t: { last_ohlc_fetch?: string }) => t.last_ohlc_fetch)
           .map((t: { symbol: string }) => t.symbol);
-
-        // Merge holdings tickers with backend tickers
-        const holdingTickers = holdings.map(h => h.ticker);
+        const holdingTickers = holdings.map((h) => h.ticker);
         const merged = Array.from(new Set([...backendTickers, ...holdingTickers]));
         setActiveTickers(merged);
         if (merged.length > 0 && !selectedSymbol) {
-          // Prefer first holding ticker if available
-          const firstHolding = holdingTickers.find(t => backendTickers.includes(t));
+          const firstHolding = holdingTickers.find((t) => backendTickers.includes(t));
           setSelectedSymbol(firstHolding || merged[0]);
         }
       })
       .catch(() => {
-        // Fallback to holdings tickers only
-        const holdingTickers = holdings.map(h => h.ticker);
+        const holdingTickers = holdings.map((h) => h.ticker);
         if (holdingTickers.length > 0) {
           setActiveTickers(holdingTickers);
           if (!selectedSymbol) setSelectedSymbol(holdingTickers[0]);
         }
       });
-  }, [holdings]);
-
-  useEffect(() => {
-    if (selectedRange && chartAreaRef.current) {
-      setChartRect(chartAreaRef.current.getBoundingClientRect());
-    }
-  }, [selectedRange]);
+  }, [holdings, selectedSymbol]);
 
   const handleHover = useCallback(
     (date: string | null, ohlc?: { date: string; open: number; high: number; low: number; close: number; change: number }) => {
-      if (!lockedArticle) {
-        setHoveredDate(date);
-      }
+      if (!lockedArticle) setHoveredDate(date);
       setHoveredOhlc(ohlc || null);
     },
     [lockedArticle]
@@ -157,6 +149,8 @@ export default function CatalystPage({ holdings }: Props) {
   const handleRangeSelect = useCallback((range: RangeSelection | null) => {
     setSelectedRange(range);
     setRangeQuestion(null);
+    setCustomRangeQuestion('');
+    setPredView(range ? 'ask' : 'prediction');
     if (range) {
       setSelectedDay(null);
       setSelectedArticle(null);
@@ -178,6 +172,7 @@ export default function CatalystPage({ holdings }: Props) {
       setSelectedArticle(article);
       setSelectedRange(null);
       setRangeQuestion(null);
+      setPredView('prediction');
       setSelectedDay(null);
       setHoveredDate(article.date);
       return article;
@@ -188,12 +183,14 @@ export default function CatalystPage({ holdings }: Props) {
     setSelectedDay(date);
     setSelectedRange(null);
     setRangeQuestion(null);
+    setPredView('prediction');
     setSelectedArticle(null);
     setLockedArticle(null);
   }, []);
 
   const handleRangeAsk = useCallback((question: string) => {
     setRangeQuestion(question);
+    setPredView('ask');
   }, []);
 
   const handleCategoryChange = useCallback((category: string | null, articleIds: string[], color?: string) => {
@@ -201,31 +198,6 @@ export default function CatalystPage({ holdings }: Props) {
     setActiveCategoryIds(articleIds);
     setActiveCategoryColor(color ?? null);
   }, []);
-
-  async function handleSelectSymbol(symbol: string) {
-    setSelectedSymbol(symbol);
-    setHoveredDate(null);
-    setHoveredOhlc(null);
-    setSelectedRange(null);
-    setRangeQuestion(null);
-    setSelectedDay(null);
-    setSelectedArticle(null);
-    setLockedArticle(null);
-    setActiveCategory(null);
-    setActiveCategoryIds([]);
-    setActiveCategoryColor(null);
-
-    try {
-      const res = await catalystApi.get(`stocks/${symbol}/status`);
-      if (!res.data?.has_ohlc) {
-        catalystApi.post('stocks', { symbol }).catch(console.error);
-        await waitForTickerReady(symbol);
-      }
-    } catch {
-      // If status check fails, try a best-effort refresh anyway.
-      catalystApi.post('stocks', { symbol }).catch(console.error);
-    }
-  }
 
   async function waitForTickerReady(symbol: string) {
     setTickerLoading(true);
@@ -250,6 +222,31 @@ export default function CatalystPage({ holdings }: Props) {
     return false;
   }
 
+  async function handleSelectSymbol(symbol: string) {
+    setSelectedSymbol(symbol);
+    setHoveredDate(null);
+    setHoveredOhlc(null);
+    setSelectedRange(null);
+    setRangeQuestion(null);
+    setPredView('prediction');
+    setSelectedDay(null);
+    setSelectedArticle(null);
+    setLockedArticle(null);
+    setActiveCategory(null);
+    setActiveCategoryIds([]);
+    setActiveCategoryColor(null);
+
+    try {
+      const res = await catalystApi.get(`stocks/${symbol}/status`);
+      if (!res.data?.has_ohlc) {
+        catalystApi.post('stocks', { symbol }).catch(console.error);
+        await waitForTickerReady(symbol);
+      }
+    } catch {
+      catalystApi.post('stocks', { symbol }).catch(console.error);
+    }
+  }
+
   async function handleAddTicker(symbol: string) {
     if (!activeTickers.includes(symbol)) {
       setActiveTickers((prev) => [...prev, symbol]);
@@ -263,20 +260,6 @@ export default function CatalystPage({ holdings }: Props) {
   const isLocked = lockedArticle !== null;
 
   function renderRightPanel() {
-    if (selectedRange && rangeQuestion) {
-      return (
-        <RangeAnalysisPanel
-          symbol={selectedSymbol}
-          startDate={selectedRange.startDate}
-          endDate={selectedRange.endDate}
-          question={rangeQuestion}
-          onClear={() => {
-            setSelectedRange(null);
-            setRangeQuestion(null);
-          }}
-        />
-      );
-    }
     if (selectedRange && !rangeQuestion) {
       return (
         <RangeNewsPanel
@@ -284,7 +267,10 @@ export default function CatalystPage({ holdings }: Props) {
           startDate={selectedRange.startDate}
           endDate={selectedRange.endDate}
           priceChange={selectedRange.priceChange}
-          onClose={() => setSelectedRange(null)}
+          onClose={() => {
+            setSelectedRange(null);
+            setPredView('prediction');
+          }}
           onAskAI={handleRangeAsk}
         />
       );
@@ -333,7 +319,10 @@ export default function CatalystPage({ holdings }: Props) {
                   </linearGradient>
                 </defs>
               </svg>
-              <span className="brand-text">CatalystTracker</span>
+              <div className="brand-stack">
+                <span className="brand-text">CatalystTracker</span>
+                <span className="brand-subtext">Event-driven research workspace</span>
+              </div>
             </div>
             <StockSelector
               activeTickers={activeTickers}
@@ -352,68 +341,59 @@ export default function CatalystPage({ holdings }: Props) {
             ) : hoveredOhlc ? (
               <div className="header-ohlc">
                 <span className="ohlc-date">{hoveredOhlc.date}</span>
-                <span className="ohlc-label">O</span>
-                <span className="ohlc-val">${hoveredOhlc.open.toFixed(2)}</span>
-                <span className="ohlc-label">H</span>
-                <span className="ohlc-val">${hoveredOhlc.high.toFixed(2)}</span>
-                <span className="ohlc-label">L</span>
-                <span className="ohlc-val">${hoveredOhlc.low.toFixed(2)}</span>
-                <span className="ohlc-label">C</span>
-                <span className="ohlc-val">${hoveredOhlc.close.toFixed(2)}</span>
+                <span className="ohlc-label">O</span><span className="ohlc-val">${hoveredOhlc.open.toFixed(2)}</span>
+                <span className="ohlc-label">H</span><span className="ohlc-val">${hoveredOhlc.high.toFixed(2)}</span>
+                <span className="ohlc-label">L</span><span className="ohlc-val">${hoveredOhlc.low.toFixed(2)}</span>
+                <span className="ohlc-label">C</span><span className="ohlc-val">${hoveredOhlc.close.toFixed(2)}</span>
                 <span className={`ohlc-change ${hoveredOhlc.change >= 0 ? 'up' : 'down'}`}>
-                  {hoveredOhlc.change >= 0 ? '+' : ''}
-                  {hoveredOhlc.change.toFixed(2)}%
+                  {hoveredOhlc.change >= 0 ? '+' : ''}{hoveredOhlc.change.toFixed(2)}%
                 </span>
               </div>
             ) : null}
           </div>
         </header>
 
+        {selectedRange && (
+          <div className="range-status-bar">
+            <div className="range-status-left">
+              <span className="range-status-pill">Range Mode Active</span>
+              <span className="range-status-dates">{selectedRange.startDate} → {selectedRange.endDate}</span>
+              <span className={`range-change ${(selectedRange.priceChange ?? 0) >= 0 ? 'up' : 'down'}`}>
+                {(selectedRange.priceChange ?? 0) >= 0 ? '+' : ''}{(selectedRange.priceChange ?? 0).toFixed(2)}%
+              </span>
+            </div>
+            <div className="range-status-actions">
+              <button className={`range-mode-btn ${predView === 'prediction' ? 'active' : ''}`} onClick={() => setPredView('prediction')}>Prediction</button>
+              <button className={`range-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => setPredView('ask')}>AI Question</button>
+              <button className="range-exit-btn" onClick={() => {
+                setSelectedRange(null);
+                setRangeQuestion(null);
+                setPredView('prediction');
+              }}>Exit Range</button>
+            </div>
+          </div>
+        )}
+
         <main className="app-main">
           <div className="chart-area" ref={chartAreaRef}>
             {selectedSymbol ? (
-              <>
-                <CandlestickChart
-                  symbol={selectedSymbol}
-                  lockedNewsId={lockedArticle?.newsId ?? null}
-                  highlightedArticleIds={activeCategoryIds.length > 0 ? activeCategoryIds : null}
-                  highlightColor={activeCategoryColor}
-                  onHover={handleHover}
-                  onRangeSelect={handleRangeSelect}
-                  onArticleSelect={handleArticleSelect}
-                  onDayClick={handleDayClick}
-                />
-                {selectedRange && !rangeQuestion && (
-                  <RangeQueryPopup
-                    range={selectedRange}
-                    chartRect={chartRect}
-                    onAsk={handleRangeAsk}
-                    onClose={() => setSelectedRange(null)}
-                  />
-                )}
-              </>
+              <CandlestickChart
+                symbol={selectedSymbol}
+                lockedNewsId={lockedArticle?.newsId ?? null}
+                highlightedArticleIds={activeCategoryIds.length > 0 ? activeCategoryIds : null}
+                highlightColor={activeCategoryColor}
+                onHover={handleHover}
+                onRangeSelect={handleRangeSelect}
+                onArticleSelect={handleArticleSelect}
+                onDayClick={handleDayClick}
+              />
             ) : (
               <div className="chart-placeholder">Select a ticker to view the chart</div>
             )}
           </div>
+
           {selectedSymbol && (
             <div className="prediction-area">
-              {selectedRange && (
-                <div className="pred-switcher">
-                  <button
-                    className={`pred-switch-btn ${predView === 'prediction' ? 'active' : ''}`}
-                    onClick={() => setPredView('prediction')}
-                  >
-                    Prediction
-                  </button>
-                  <button
-                    className={`pred-switch-btn ${predView === 'ask' ? 'active' : ''}`}
-                    onClick={() => setPredView('ask')}
-                  >
-                    AI Question
-                  </button>
-                </div>
-              )}
               {predView === 'ask' && selectedRange ? (
                 rangeQuestion ? (
                   <RangeAnalysisPanel
@@ -422,8 +402,9 @@ export default function CatalystPage({ holdings }: Props) {
                     endDate={selectedRange.endDate}
                     question={rangeQuestion}
                     onClear={() => {
+                      setSelectedRange(null);
                       setRangeQuestion(null);
-                      setPredView('ask');
+                      setPredView('prediction');
                     }}
                   />
                 ) : (
@@ -443,18 +424,13 @@ export default function CatalystPage({ holdings }: Props) {
                         'Summarize key news in this period',
                         'What are the bull/bear factors?',
                       ].map((q) => (
-                        <button key={q} className="pred-ask-preset" onClick={() => handleRangeAsk(q)}>
-                          {q}
-                        </button>
+                        <button key={q} className="pred-ask-preset" onClick={() => handleRangeAsk(q)}>{q}</button>
                       ))}
                     </div>
-                    <form
-                      className="pred-ask-form"
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        if (customRangeQuestion.trim()) handleRangeAsk(customRangeQuestion.trim());
-                      }}
-                    >
+                    <form className="pred-ask-form" onSubmit={(e) => {
+                      e.preventDefault();
+                      if (customRangeQuestion.trim()) handleRangeAsk(customRangeQuestion.trim());
+                    }}>
                       <input
                         value={customRangeQuestion}
                         onChange={(e) => setCustomRangeQuestion(e.target.value)}
@@ -469,9 +445,10 @@ export default function CatalystPage({ holdings }: Props) {
               )}
             </div>
           )}
+
           <div className="news-area">
             {tickerLoading ? (
-              <div className="news-empty">Preparing news for {selectedSymbol}...</div>
+              <div className="news-empty">{tickerLoadingMessage || `Preparing news for ${selectedSymbol}...`}</div>
             ) : (
               <>
                 {selectedSymbol && !selectedRange && (
@@ -491,4 +468,3 @@ export default function CatalystPage({ holdings }: Props) {
     </div>
   );
 }
-

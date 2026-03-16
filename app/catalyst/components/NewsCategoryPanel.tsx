@@ -28,7 +28,7 @@ const CATEGORY_META: Record<string, { icon: string; zh: string; color: string }>
   earnings:     { icon: '💰', zh: 'Earnings',            color: '#10b981' },
   product_tech: { icon: '🚀', zh: 'Product & Tech',      color: '#8b5cf6' },
   competition:  { icon: '⚔️',  zh: 'Competition',         color: '#ef4444' },
-  management:   { icon: '👤', zh: 'Management Change',   color: '#06b6d4' },
+  management:   { icon: '👤', zh: 'Management',          color: '#06b6d4' },
 };
 
 type SentimentFilter = 'all' | 'positive' | 'negative';
