@@ -55,6 +55,7 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
   const [displayDate, setDisplayDate] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const cacheRef = useRef<Map<string, NewsItem[]>>(new Map());
+  const requestSeqRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
 
   // Debounced fetch on hover
@@ -89,8 +90,10 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
 
   // Clear cache on symbol change
   useEffect(() => {
+    requestSeqRef.current += 1;
     cacheRef.current.clear();
     setNews([]);
+    setLoading(false);
     setDisplayDate(null);
   }, [symbol]);
 

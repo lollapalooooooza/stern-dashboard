@@ -229,6 +229,7 @@ export default function CatalystPage({ holdings }: Props) {
   }
 
   async function handleSelectSymbol(symbol: string) {
+    if (!symbol || symbol === selectedSymbol) return;
     setSelectedSymbol(symbol);
     setHoveredDate(null);
     setHoveredOhlc(null);
@@ -301,6 +302,7 @@ export default function CatalystPage({ holdings }: Props) {
     }
     return (
       <NewsPanel
+        key={`news-${selectedSymbol}`}
         symbol={selectedSymbol}
         hoveredDate={effectiveDate}
         onFindSimilar={(_newsId: string) => {
@@ -383,6 +385,7 @@ export default function CatalystPage({ holdings }: Props) {
               {predView === 'ask' && selectedRange ? (
                 rangeQuestion ? (
                   <RangeAnalysisPanel
+                    key={`range-analysis-inline-${selectedSymbol}-${selectedRange.startDate}-${selectedRange.endDate}`}
                     symbol={selectedSymbol}
                     startDate={selectedRange.startDate}
                     endDate={selectedRange.endDate}
