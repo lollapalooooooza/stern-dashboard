@@ -588,6 +588,7 @@ export default function App() {
 
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0">
+        {page!=="catalyst" && (
         <header className="no-print bg-white border-b px-6 py-3 flex items-center justify-between">
           <div><h1 className="text-lg font-bold text-slate-800">{NAV.find(n=>n.id===page)?.label}</h1><p className="text-xs text-slate-500">NYU Stern MIF · <span className="font-semibold" style={{color:GROUP_COLORS[group]}}>{GROUP_LABELS[group]}</span> · DB-backed</p></div>
           <div className="flex items-center gap-3">
@@ -596,7 +597,8 @@ export default function App() {
             <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"/><span className="text-xs text-slate-500">DB</span></div>
           </div>
         </header>
-        <main className={`flex-1 overflow-y-auto ${page==='catalyst'?'p-0':'p-6'} print:p-0`}>
+        )}
+        <main className={`flex-1 min-h-0 ${page==='catalyst'?'overflow-hidden p-0 bg-[#0f1117]':'overflow-y-auto p-6'} print:p-0`}>
           {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
           {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
           {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
