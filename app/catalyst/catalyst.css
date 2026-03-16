@@ -270,11 +270,12 @@
 .catalyst-wrapper .range-status-pill {
   padding: 4px 10px;
   border-radius: 999px;
-  background: rgba(102,126,234,0.16);
-  color: #cfd8ff;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
+  background: linear-gradient(180deg, rgba(102,126,234,0.24), rgba(102,126,234,0.14));
+  color: #dbe3ff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.45px;
+  text-transform: uppercase;
 }
 .catalyst-wrapper .range-status-dates { color: var(--text-secondary); font-family: var(--font-mono); font-size: 13px; }
 .catalyst-wrapper .range-status-actions { display: flex; align-items: center; gap: 8px; }

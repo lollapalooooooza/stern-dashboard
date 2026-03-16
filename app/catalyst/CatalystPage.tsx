@@ -388,10 +388,10 @@ export default function CatalystPage({ holdings }: Props) {
             </div>
             <div className="range-status-actions">
               <button className={`range-mode-btn ${predView === 'prediction' ? 'active' : ''}`} onClick={() => setPredView('prediction')}>
-                Prediction
+                <span className="range-mode-dot" /> Prediction
               </button>
               <button className={`range-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => setPredView('ask')}>
-                AI Question
+                <span className="range-mode-dot" /> AI Question
               </button>
               <button
                 className="range-exit-btn"

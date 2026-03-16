@@ -267,13 +267,21 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
   return (
     <div ref={containerRef} className="chart-container">
       <div className="chart-toolbar">
-        <div className="chart-toolbar-group">
-          <button className="chart-tool-btn" onClick={() => setViewSize((s) => Math.min(rawOhlc.length || s, s + 30))}>− Zoom Out</button>
-          <button className="chart-tool-btn" onClick={() => setViewSize((s) => Math.max(40, s - 30))}>+ Zoom In</button>
+        <div className="chart-toolbar-group chart-toolbar-group-terminal">
+          <button className="chart-tool-btn" title="Zoom out" onClick={() => setViewSize((s) => Math.min(rawOhlc.length || s, s + 30))}>
+            <span className="chart-tool-icon">－</span><span className="chart-tool-label">Zoom Out</span>
+          </button>
+          <button className="chart-tool-btn" title="Zoom in" onClick={() => setViewSize((s) => Math.max(40, s - 30))}>
+            <span className="chart-tool-icon">＋</span><span className="chart-tool-label">Zoom In</span>
+          </button>
         </div>
-        <div className="chart-toolbar-group">
-          <button className="chart-tool-btn" disabled={!canPanLeft} onClick={() => setViewEnd((v) => v === null ? v : Math.max(viewSize, v - 30))}>← Earlier</button>
-          <button className="chart-tool-btn" disabled={!canPanRight} onClick={() => setViewEnd((v) => v === null ? v : Math.min(rawOhlc.length, v + 30))}>Later →</button>
+        <div className="chart-toolbar-group chart-toolbar-group-terminal">
+          <button className="chart-tool-btn" title="Pan earlier" disabled={!canPanLeft} onClick={() => setViewEnd((v) => v === null ? v : Math.max(viewSize, v - 30))}>
+            <span className="chart-tool-icon">←</span><span className="chart-tool-label">Earlier</span>
+          </button>
+          <button className="chart-tool-btn" title="Pan later" disabled={!canPanRight} onClick={() => setViewEnd((v) => v === null ? v : Math.min(rawOhlc.length, v + 30))}>
+            <span className="chart-tool-label">Later</span><span className="chart-tool-icon">→</span>
+          </button>
         </div>
       </div>
       {loading && (
