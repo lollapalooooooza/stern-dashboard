@@ -89,48 +89,6 @@ export default function RangeNewsPanel({ symbol, startDate, endDate, priceChange
         {data && <span className="news-count" style={{ marginLeft: 8 }}>{data.total} articles</span>}
       </div>
 
-      <div className="range-ask-box" style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-        <div style={{ fontSize: 13, color: '#8ea0c7', marginBottom: 8 }}>Ask AI about this selected range</div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-          {PRESET_QUESTIONS.map((q) => (
-            <button
-              key={q}
-              className="range-news-all-btn"
-              style={{ width: 'auto', padding: '6px 10px' }}
-              onClick={() => onAskAI(q)}
-            >
-              {q}
-            </button>
-          ))}
-        </div>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (question.trim()) onAskAI(question.trim());
-          }}
-          style={{ display: 'flex', gap: 8 }}
-        >
-          <input
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            placeholder="Ask your own question..."
-            style={{
-              flex: 1,
-              background: 'rgba(255,255,255,0.04)',
-              border: '1px solid rgba(255,255,255,0.08)',
-              color: '#e6ecff',
-              borderRadius: 8,
-              padding: '8px 10px',
-              fontSize: 14,
-              outline: 'none',
-            }}
-          />
-          <button type="submit" className="range-news-ai-btn" style={{ marginTop: 0, width: 'auto', padding: '8px 12px' }}>
-            Ask
-          </button>
-        </form>
-      </div>
-
       {loading ? (
         <div className="news-empty">
           <div className="range-loading">

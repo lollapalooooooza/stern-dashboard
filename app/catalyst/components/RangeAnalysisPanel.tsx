@@ -101,7 +101,7 @@ export default function RangeAnalysisPanel({ symbol, startDate, endDate, questio
       ) : error ? (
         <div className="news-empty">{error}</div>
       ) : data ? (
-        <div className="news-list">
+        <div className="news-list range-analysis-vertical">
           {/* Question asked */}
           {question && (
             <div className="range-question-card">

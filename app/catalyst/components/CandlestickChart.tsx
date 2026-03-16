@@ -263,6 +263,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
 
   const canPanLeft = viewEnd !== null && viewEnd - viewSize > 0;
   const canPanRight = viewEnd !== null && rawOhlc.length > 0 && viewEnd < rawOhlc.length;
+  const maxEnd = rawOhlc.length || 1;
 
   return (
     <div ref={containerRef} className="chart-container">
@@ -297,6 +298,22 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       <svg ref={svgRef}></svg>
       <canvas ref={canvasRef} className="particle-layer" />
       <div ref={tooltipRef} className="particle-tooltip" style={{ display: 'none' }} />
+      <div className="chart-timeline-wrap">
+        <input
+          className="chart-timeline-slider"
+          type="range"
+          min={Math.min(viewSize, maxEnd)}
+          max={maxEnd}
+          step={1}
+          value={viewEnd ?? maxEnd}
+          onChange={(e) => setViewEnd(Number(e.target.value))}
+        />
+        <div className="chart-timeline-labels">
+          <span>Earlier</span>
+          <span>Timeline</span>
+          <span>Later</span>
+        </div>
+      </div>
     </div>
   );
 }
