@@ -346,15 +346,7 @@ export default function CatalystPage({ holdings }: Props) {
               ) : null}
             </div>
 
-            <div className="header-right">
-              <div className="header-mode-switch">
-                <button className={`header-mode-btn ${predView === 'prediction' ? 'active' : ''}`} onClick={() => setPredView('prediction')}>
-                  Prediction
-                </button>
-                <button className={`header-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => selectedRange && setPredView('ask')} disabled={!selectedRange}>
-                  AI Question
-                </button>
-              </div>
+            <div className="header-right" data-mode={predView}>
               {selectedRange && (
                 <button
                   className="header-exit-btn"
@@ -367,6 +359,14 @@ export default function CatalystPage({ holdings }: Props) {
                   Exit
                 </button>
               )}
+              <div className="header-mode-switch">
+                <button className={`header-mode-btn ${predView === 'prediction' ? 'active' : ''}`} onClick={() => setPredView('prediction')}>
+                  Prediction
+                </button>
+                <button className={`header-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => selectedRange && setPredView('ask')} disabled={!selectedRange}>
+                  AI Question
+                </button>
+              </div>
             </div>
           </div>
         </header>
