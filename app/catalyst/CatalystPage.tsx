@@ -59,6 +59,8 @@ export default function CatalystPage({ holdings }: Props) {
   const [activeCategoryColor, setActiveCategoryColor] = useState<string | null>(null);
   const [tickerLoading, setTickerLoading] = useState(false);
   const [tickerLoadingMessage, setTickerLoadingMessage] = useState('');
+  const [predView, setPredView] = useState<'prediction' | 'ask'>('prediction');
+  const [customRangeQuestion, setCustomRangeQuestion] = useState('');
 
   const [watchlist, setWatchlist] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('ct-watchlist') || '[]'); } catch { return []; }
@@ -396,7 +398,75 @@ export default function CatalystPage({ holdings }: Props) {
           </div>
           {selectedSymbol && (
             <div className="prediction-area">
-              <PredictionPanel symbol={selectedSymbol} />
+              {selectedRange && (
+                <div className="pred-switcher">
+                  <button
+                    className={`pred-switch-btn ${predView === 'prediction' ? 'active' : ''}`}
+                    onClick={() => setPredView('prediction')}
+                  >
+                    Prediction
+                  </button>
+                  <button
+                    className={`pred-switch-btn ${predView === 'ask' ? 'active' : ''}`}
+                    onClick={() => setPredView('ask')}
+                  >
+                    AI Question
+                  </button>
+                </div>
+              )}
+              {predView === 'ask' && selectedRange ? (
+                rangeQuestion ? (
+                  <RangeAnalysisPanel
+                    symbol={selectedSymbol}
+                    startDate={selectedRange.startDate}
+                    endDate={selectedRange.endDate}
+                    question={rangeQuestion}
+                    onClear={() => {
+                      setRangeQuestion(null);
+                      setPredView('ask');
+                    }}
+                  />
+                ) : (
+                  <div className="pred-ask-panel">
+                    <div className="pred-ask-header">
+                      <div>
+                        <div className="pred-ask-title">Ask AI about selected range</div>
+                        <div className="pred-ask-meta">{selectedRange.startDate} ~ {selectedRange.endDate}</div>
+                      </div>
+                      <span className={`range-change ${((selectedRange.priceChange ?? 0) >= 0) ? 'up' : 'down'}`}>
+                        {((selectedRange.priceChange ?? 0) >= 0) ? '+' : ''}{(selectedRange.priceChange ?? 0).toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="pred-ask-presets">
+                      {[
+                        "What's driving the price movement?",
+                        'Summarize key news in this period',
+                        'What are the bull/bear factors?',
+                      ].map((q) => (
+                        <button key={q} className="pred-ask-preset" onClick={() => handleRangeAsk(q)}>
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                    <form
+                      className="pred-ask-form"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (customRangeQuestion.trim()) handleRangeAsk(customRangeQuestion.trim());
+                      }}
+                    >
+                      <input
+                        value={customRangeQuestion}
+                        onChange={(e) => setCustomRangeQuestion(e.target.value)}
+                        placeholder="Ask your own question about this range..."
+                      />
+                      <button type="submit">Ask</button>
+                    </form>
+                  </div>
+                )
+              ) : (
+                <PredictionPanel symbol={selectedSymbol} />
+              )}
             </div>
           )}
           <div className="news-area">
