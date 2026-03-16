@@ -72,12 +72,16 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
   const [loading, setLoading] = useState(false);
   const [rawOhlc, setRawOhlc] = useState<OHLCRow[]>([]);
   const [rawParticles, setRawParticles] = useState<Particle[]>([]);
+  const requestSeqRef = useRef(0);
   const [viewStart, setViewStart] = useState(0);
   const [viewCount, setViewCount] = useState<number | null>(null);
 
   useEffect(() => {
     if (!symbol) return;
+    const reqId = ++requestSeqRef.current;
     setLoading(true);
+    setRawOhlc([]);
+    setRawParticles([]);
     setViewCount(null);
     setViewStart(0);
 
@@ -86,14 +90,20 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       catalystApi.get<Particle[]>(`news/${symbol}/particles`),
     ])
       .then(([ohlcRes, particlesRes]) => {
+        if (reqId !== requestSeqRef.current) return;
         const nextOhlc = ohlcRes.data || [];
         setRawOhlc(nextOhlc);
         setRawParticles(particlesRes.data || []);
         setViewCount(nextOhlc.length || null);
         setViewStart(0);
       })
-      .catch((err) => console.error('Chart error:', err))
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        if (reqId !== requestSeqRef.current) return;
+        console.error('Chart error:', err);
+      })
+      .finally(() => {
+        if (reqId === requestSeqRef.current) setLoading(false);
+      });
   }, [symbol]);
 
   const visibleOhlc = useMemo(() => {

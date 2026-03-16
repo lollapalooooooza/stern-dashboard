@@ -372,6 +372,7 @@ export default function CatalystPage({ holdings }: Props) {
           <div className="chart-area" ref={chartAreaRef}>
             {selectedSymbol ? (
               <CandlestickChart
+                key={`chart-${selectedSymbol}`}
                 symbol={selectedSymbol}
                 lockedNewsId={lockedArticle?.newsId ?? null}
                 highlightedArticleIds={activeCategoryIds.length > 0 ? activeCategoryIds : null}
