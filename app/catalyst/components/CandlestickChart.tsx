@@ -167,16 +167,38 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .style('stroke-width', 1);
     grid.selectAll('.domain').remove();
 
+    const defs = svg.append('defs');
+    const areaGradient = defs.append('linearGradient')
+      .attr('id', 'sd-line-area-gradient')
+      .attr('x1', '0%')
+      .attr('y1', '0%')
+      .attr('x2', '0%')
+      .attr('y2', '100%');
+    areaGradient.append('stop').attr('offset', '0%').attr('stop-color', '#00e676').attr('stop-opacity', 0.12);
+    areaGradient.append('stop').attr('offset', '55%').attr('stop-color', '#00e676').attr('stop-opacity', 0.04);
+    areaGradient.append('stop').attr('offset', '100%').attr('stop-color', '#00e676').attr('stop-opacity', 0);
+
     const line = d3.line<typeof data[number]>()
       .x((d) => x(d.date))
       .y((d) => y(d.close))
       .curve(d3.curveMonotoneX);
 
+    const area = d3.area<typeof data[number]>()
+      .x((d) => x(d.date))
+      .y0(height)
+      .y1((d) => y(d.close))
+      .curve(d3.curveMonotoneX);
+
+    g.append('path')
+      .datum(data)
+      .attr('fill', 'url(#sd-line-area-gradient)')
+      .attr('d', area);
+
     g.append('path')
       .datum(data)
       .attr('fill', 'none')
-      .attr('stroke', 'rgba(0, 230, 118, 0.18)')
-      .attr('stroke-width', 5)
+      .attr('stroke', 'rgba(0, 230, 118, 0.15)')
+      .attr('stroke-width', 6)
       .attr('stroke-linecap', 'round')
       .attr('stroke-linejoin', 'round')
       .attr('d', line);
@@ -184,8 +206,8 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     g.append('path')
       .datum(data)
       .attr('fill', 'none')
-      .attr('stroke', '#00e676')
-      .attr('stroke-width', 2.2)
+      .attr('stroke', '#17d96c')
+      .attr('stroke-width', 2.25)
       .attr('stroke-linecap', 'round')
       .attr('stroke-linejoin', 'round')
       .attr('d', line);
@@ -211,9 +233,10 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
         items.forEach((p, idx) => {
           const px = margin.left + x(day.date);
           const py = margin.top + y(day.low) + 8 + idx * 6;
-          const radius = p.id === lockedNewsId ? 4.5 : highlighted?.has(p.id) ? 4 : 3;
-          const color = highlighted?.has(p.id) && highlightColor ? highlightColor : SENTIMENT_COLOR[p.s || 'neutral'] || '#666';
-          ctx.globalAlpha = p.id === lockedNewsId || highlighted?.has(p.id) ? 1 : 0.6;
+          const isHighlighted = !!highlighted?.has(p.id);
+          const radius = p.id === lockedNewsId ? 4.5 : isHighlighted ? 4 : 3;
+          const color = isHighlighted && highlightColor ? highlightColor : SENTIMENT_COLOR[p.s || 'neutral'] || '#666';
+          ctx.globalAlpha = highlighted ? (p.id === lockedNewsId || isHighlighted ? 0.98 : 0.14) : (p.id === lockedNewsId ? 0.98 : 0.34);
           ctx.fillStyle = color;
           ctx.beginPath();
           ctx.arc(px * dpr, py * dpr, radius * dpr, 0, Math.PI * 2);
@@ -224,8 +247,10 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     }
 
     const bisect = d3.bisector<typeof data[0], Date>((d) => d.date).left;
-    const crossV = g.append('line').style('stroke', '#333').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
-    const crossH = g.append('line').style('stroke', '#333').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
+    const crossV = g.append('line').style('stroke', 'rgba(255,255,255,0.18)').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
+    const crossH = g.append('line').style('stroke', 'rgba(255,255,255,0.12)').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
+    const hoverGlow = g.append('circle').attr('r', 10).attr('fill', 'rgba(23, 217, 108, 0.18)').style('display', 'none');
+    const hoverDot = g.append('circle').attr('r', 3.5).attr('fill', '#17d96c').attr('stroke', 'rgba(6, 12, 18, 0.95)').attr('stroke-width', 1.2).style('display', 'none');
 
     function snapToData(px: number) {
       const xDate = x.invert(px);
@@ -273,6 +298,8 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .on('mouseleave.hover', function () {
         crossV.style('display', 'none');
         crossH.style('display', 'none');
+        hoverGlow.style('display', 'none');
+        hoverDot.style('display', 'none');
         onHover(null);
         if (tooltipRef.current) tooltipRef.current.style.display = 'none';
       });
