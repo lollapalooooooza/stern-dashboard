@@ -353,6 +353,17 @@ export default function CatalystPage({ holdings }: Props) {
                     {(selectedRange.priceChange ?? 0).toFixed(2)}%
                   </span>
                 </div>
+              ) : hoveredOhlc ? (
+                <div className="header-range-pill header-ohlc-pill">
+                  <span className="header-range-label">Day</span>
+                  <span className="header-range-dates">{hoveredOhlc.date}</span>
+                  <span className="header-ohlc-mini">L {hoveredOhlc.low.toFixed(2)}</span>
+                  <span className="header-ohlc-mini">H {hoveredOhlc.high.toFixed(2)}</span>
+                  <span className="header-ohlc-mini">C {hoveredOhlc.close.toFixed(2)}</span>
+                  <span className={`range-change ${hoveredOhlc.change >= 0 ? 'up' : 'down'}`}>
+                    {hoveredOhlc.change >= 0 ? '+' : ''}{hoveredOhlc.change.toFixed(2)}%
+                  </span>
+                </div>
               ) : null}
             </div>
 

@@ -287,6 +287,39 @@
   white-space: nowrap;
 }
 
+.catalyst-wrapper .header-ohlc-pill {
+  gap: 8px;
+}
+
+.catalyst-wrapper .header-ohlc-mini {
+  font-size: 11px;
+  color: rgba(206, 214, 224, 0.82);
+  font-family: var(--font-mono);
+}
+
+.catalyst-wrapper .chart-hover-tip-date {
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.92);
+  margin-bottom: 4px;
+}
+
+.catalyst-wrapper .chart-hover-tip-summary {
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(225, 232, 240, 0.84);
+  margin-bottom: 6px;
+  max-width: 220px;
+}
+
+.catalyst-wrapper .chart-hover-tip-change {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.catalyst-wrapper .chart-hover-tip-change.up { color: #17d96c; }
+.catalyst-wrapper .chart-hover-tip-change.down { color: #ff6b6b; }
+
 .catalyst-wrapper .header-mode-switch {
   position: relative;
   display: inline-grid;
@@ -1437,7 +1470,7 @@
 .catalyst-wrapper .particle-layer { position: absolute; top: 0; left: 0; pointer-events: none; }
 
 /* Particle Tooltip */
-.catalyst-wrapper .particle-tooltip { position: absolute; background: rgba(10, 14, 24, 0.95); border: 1px solid #1e3a5f; border-radius: var(--radius-md); padding: 10px 14px; pointer-events: none; z-index: 50; max-width: 280px; box-shadow: 0 0 16px var(--cyan-glow); }
+.catalyst-wrapper .particle-tooltip { position: absolute; pointer-events: none; z-index: 50; min-width: 180px; max-width: 240px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; background: rgba(12, 16, 24, 0.78); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); box-shadow: 0 14px 34px rgba(0,0,0,0.28); }
 .catalyst-wrapper .pt-title { font-size: 16px; color: var(--text-heading); line-height: 1.4; margin-bottom: 4px; }
 .catalyst-wrapper .pt-meta { display: flex; align-items: center; gap: 10px; font-size: 15px; font-family: var(--font-mono); }
 .catalyst-wrapper .pt-sentiment { text-transform: capitalize; font-weight: 600; }

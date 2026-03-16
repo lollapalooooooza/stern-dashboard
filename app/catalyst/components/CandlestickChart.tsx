@@ -73,6 +73,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
   const [rawOhlc, setRawOhlc] = useState<OHLCRow[]>([]);
   const [rawParticles, setRawParticles] = useState<Particle[]>([]);
   const requestSeqRef = useRef(0);
+  const summaryCacheRef = useRef<Map<string, string>>(new Map());
   const [viewStart, setViewStart] = useState(0);
   const [viewCount, setViewCount] = useState<number | null>(null);
 
@@ -291,6 +292,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     }
 
     const bisect = d3.bisector<typeof data[0], Date>((d) => d.date).left;
+    const hoverBand = g.append('rect').attr('y', 0).attr('height', height).attr('rx', 10).attr('fill', 'rgba(255,255,255,0.04)').attr('stroke', 'rgba(255,255,255,0.04)').style('display', 'none').style('pointer-events', 'none');
     const crossV = g.append('line').style('stroke', 'rgba(255,255,255,0.18)').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
     const crossH = g.append('line').style('stroke', 'rgba(255,255,255,0.12)').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
     const hoverGlow = g.append('circle').attr('r', 10).attr('fill', 'rgba(23, 217, 108, 0.18)').style('display', 'none');
@@ -333,8 +335,12 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .on('mousemove.hover', function (event) {
         const [mx, my] = d3.pointer(event);
         const d = snapToData(mx);
-        crossV.attr('x1', x(d.date)).attr('x2', x(d.date)).attr('y1', 0).attr('y2', height).style('display', null);
+        const cx = x(d.date);
+        hoverBand.attr('x', Math.max(0, cx - 26)).attr('width', 52).style('display', null);
+        crossV.attr('x1', cx).attr('x2', cx).attr('y1', 0).attr('y2', height).style('display', null);
         crossH.attr('x1', 0).attr('x2', width).attr('y1', my).attr('y2', my).style('display', null);
+        hoverGlow.attr('cx', cx).attr('cy', y(d.close)).style('display', null);
+        hoverDot.attr('cx', cx).attr('cy', y(d.close)).style('display', null);
         onHover(d.dateStr, {
           date: d.dateStr,
           open: d.open,
@@ -343,8 +349,29 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
           close: d.close,
           change: d.change,
         });
+        const tooltip = tooltipRef.current;
+        if (tooltip) {
+          const cached = summaryCacheRef.current.get(d.dateStr);
+          const renderTip = (summary?: string) => {
+            tooltip.innerHTML = `<div class="chart-hover-tip-date">${d.dateStr}</div><div class="chart-hover-tip-summary">${summary || 'Price moved on mixed market/news factors.'}</div><div class="chart-hover-tip-change ${d.change >= 0 ? 'up' : 'down'}">${d.change >= 0 ? '+' : ''}${d.change.toFixed(2)}%</div>`;
+            tooltip.style.display = 'block';
+            tooltip.style.left = `${Math.min(fullWidth - 240, Math.max(16, margin.left + cx + 14))}px`;
+            tooltip.style.top = `${Math.max(18, margin.top + y(d.close) - 18)}px`;
+          };
+          if (cached) renderTip(cached);
+          else {
+            renderTip();
+            catalystApi.get(`news/${symbol}?date=${d.dateStr}`).then((res) => {
+              const top = res.data?.[0];
+              const summary = top?.key_discussion || top?.title || 'Price moved on mixed market/news factors.';
+              summaryCacheRef.current.set(d.dateStr, summary);
+              if (tooltip.style.display !== 'none') renderTip(summary);
+            }).catch(() => {});
+          }
+        }
       })
       .on('mouseleave.hover', function () {
+        hoverBand.style('display', 'none');
         crossV.style('display', 'none');
         crossH.style('display', 'none');
         hoverGlow.style('display', 'none');
