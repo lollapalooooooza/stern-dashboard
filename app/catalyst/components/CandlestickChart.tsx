@@ -267,16 +267,20 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
         byDate.set(p.d, arr);
       });
       const highlighted = highlightedArticleIds ? new Set(highlightedArticleIds) : null;
+      const particleBottomLimit = margin.top + height - 34;
       for (const [dateStr, items] of byDate) {
         const day = data.find((d) => d.dateStr === dateStr);
         if (!day) continue;
         items.forEach((p, idx) => {
           const px = margin.left + x(day.date);
-          const py = margin.top + y(day.low) + 8 + idx * 6;
+          const desiredPy = margin.top + y(day.close) + 10 + idx * 6;
+          const py = Math.min(desiredPy, particleBottomLimit);
+          const overflow = Math.max(0, desiredPy - particleBottomLimit);
+          const densityAlpha = overflow > 0 ? Math.max(0.1, 0.34 - overflow / 42) : 0.34;
           const isHighlighted = !!highlighted?.has(p.id);
           const radius = p.id === lockedNewsId ? 4.5 : isHighlighted ? 4 : 3;
           const color = isHighlighted && highlightColor ? highlightColor : SENTIMENT_COLOR[p.s || 'neutral'] || '#666';
-          ctx.globalAlpha = highlighted ? (p.id === lockedNewsId || isHighlighted ? 0.98 : 0.14) : (p.id === lockedNewsId ? 0.98 : 0.34);
+          ctx.globalAlpha = highlighted ? (p.id === lockedNewsId || isHighlighted ? 0.98 : 0.14) : (p.id === lockedNewsId ? 0.98 : densityAlpha);
           ctx.fillStyle = color;
           ctx.beginPath();
           ctx.arc(px * dpr, py * dpr, radius * dpr, 0, Math.PI * 2);
