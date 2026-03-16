@@ -288,7 +288,7 @@
   font-weight: 700;
   cursor: pointer;
 }
-.catalyst-wrapper .range-mode-btn.active { border-color: var(--accent); color: #eef2ff; background: rgba(102,126,234,0.12); }
+.catalyst-wrapper .range-mode-btn.active { border-color: var(--accent); color: #eef2ff; background: linear-gradient(180deg, rgba(102,126,234,0.24), rgba(102,126,234,0.12)); }
 .catalyst-wrapper .range-exit-btn:hover { border-color: var(--red); color: var(--red); }
 
 .catalyst-wrapper .range-badge {

@@ -445,7 +445,8 @@ export default function CatalystPage({ holdings }: Props) {
                     <div className="pred-ask-header">
                       <div>
                         <div className="pred-ask-title">Ask AI about selected range</div>
-                        <div className="pred-ask-meta">{selectedRange.startDate} ~ {selectedRange.endDate}</div>
+                        <div className="pred-ask-meta">Use the selected window as context and ask a focused research question.</div>
+                        <div className="pred-ask-meta pred-ask-meta-mono">{selectedRange.startDate} ~ {selectedRange.endDate}</div>
                       </div>
                       <span className={`range-change ${(selectedRange.priceChange ?? 0) >= 0 ? 'up' : 'down'}`}>
                         {(selectedRange.priceChange ?? 0) >= 0 ? '+' : ''}{(selectedRange.priceChange ?? 0).toFixed(2)}%
