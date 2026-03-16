@@ -64,6 +64,7 @@ export default function CatalystPage({ holdings }: Props) {
   const [activeCategoryColor, setActiveCategoryColor] = useState<string | null>(null);
   const [tickerLoading, setTickerLoading] = useState(false);
   const [tickerLoadingMessage, setTickerLoadingMessage] = useState('');
+  const [tickerSwitching, setTickerSwitching] = useState(false);
   const [predView, setPredView] = useState<'prediction' | 'ask'>('prediction');
   const [customRangeQuestion, setCustomRangeQuestion] = useState('');
 
@@ -253,6 +254,12 @@ export default function CatalystPage({ holdings }: Props) {
       catalystApi.post('stocks', { symbol }).catch(console.error);
     }
   }
+
+  useEffect(() => {
+    if (!selectedSymbol) return;
+    const t = window.setTimeout(() => setTickerSwitching(false), 800);
+    return () => window.clearTimeout(t);
+  }, [selectedSymbol]);
 
   async function handleAddTicker(symbol: string) {
     if (!activeTickers.includes(symbol)) {
@@ -449,6 +456,14 @@ export default function CatalystPage({ holdings }: Props) {
               </>
             )}
           </div>
+          {(tickerLoading || tickerSwitching) && selectedSymbol && (
+            <div className="ticker-switch-overlay">
+              <div className="ticker-switch-card">
+                <div className="ticker-switch-spinner" />
+                <div className="ticker-switch-text">{tickerLoadingMessage || `Switching to ${selectedSymbol}...`}</div>
+              </div>
+            </div>
+          )}
         </main>
         <ToastContainer />
       </div>
