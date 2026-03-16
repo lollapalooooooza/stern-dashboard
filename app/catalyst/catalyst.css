@@ -293,16 +293,6 @@
   cursor: not-allowed;
 }
 
-.catalyst-wrapper .header-exit-btn {
-  margin-right: 8px;
-  align-self: stretch;
-  border-color: rgba(255, 92, 92, 0.22);
-  background: rgba(120, 18, 24, 0.32);
-  color: rgba(255, 226, 226, 0.96);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  box-shadow: 0 10px 24px rgba(70, 0, 6, 0.18);
-}
 
 .catalyst-wrapper .ohlc-date {
   color: var(--text-muted);

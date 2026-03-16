@@ -48,6 +48,7 @@ interface Props {
   lockedNewsId?: string | null;
   highlightedArticleIds?: string[] | null;
   highlightColor?: string | null;
+  selectedRange?: { startDate: string; endDate: string } | null;
   onHover: (date: string | null, ohlc?: HoverData) => void;
   onRangeSelect?: (range: RangeSelection | null) => void;
   onArticleSelect?: (article: ArticleSelection | null) => void;
@@ -62,7 +63,7 @@ const SENTIMENT_COLOR: Record<string, string> = {
 
 const MIN_VIEW_COUNT = 20;
 
-export default function CandlestickChart({ symbol, lockedNewsId, highlightedArticleIds, highlightColor, onHover, onRangeSelect }: Props) {
+export default function CandlestickChart({ symbol, lockedNewsId, highlightedArticleIds, highlightColor, selectedRange, onHover, onRangeSelect }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -194,6 +195,24 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .attr('fill', 'url(#sd-line-area-gradient)')
       .attr('d', area);
 
+    if (selectedRange) {
+      const selectedData = data.filter((d) => d.dateStr >= selectedRange.startDate && d.dateStr <= selectedRange.endDate);
+      if (selectedData.length >= 2) {
+        const rangeAreaGradient = defs.append('linearGradient')
+          .attr('id', 'sd-selected-range-gradient')
+          .attr('x1', '0%')
+          .attr('y1', '0%')
+          .attr('x2', '0%')
+          .attr('y2', '100%');
+        rangeAreaGradient.append('stop').attr('offset', '0%').attr('stop-color', '#24e07a').attr('stop-opacity', 0.22);
+        rangeAreaGradient.append('stop').attr('offset', '100%').attr('stop-color', '#24e07a').attr('stop-opacity', 0.03);
+        g.append('path')
+          .datum(selectedData)
+          .attr('fill', 'url(#sd-selected-range-gradient)')
+          .attr('d', area);
+      }
+    }
+
     g.append('path')
       .datum(data)
       .attr('fill', 'none')
@@ -264,7 +283,12 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     const brush = d3.brushX<unknown>()
       .extent([[0, 0], [width, height]])
       .on('end', function (event) {
-        if (!event.selection) return;
+        if (!event.selection) {
+          if (event.sourceEvent && selectedRange) {
+            onRangeSelect?.(null);
+          }
+          return;
+        }
         const [x0, x1] = event.selection as [number, number];
         const d0 = snapToData(x0);
         const d1 = snapToData(x1);

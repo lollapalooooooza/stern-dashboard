@@ -347,18 +347,6 @@ export default function CatalystPage({ holdings }: Props) {
             </div>
 
             <div className="header-right" data-mode={predView}>
-              {selectedRange && (
-                <button
-                  className="header-exit-btn"
-                  onClick={() => {
-                    setSelectedRange(null);
-                    setRangeQuestion(null);
-                    setPredView('prediction');
-                  }}
-                >
-                  Exit
-                </button>
-              )}
               <div className="header-mode-switch">
                 <button className={`header-mode-btn ${predView === 'prediction' ? 'active' : ''}`} onClick={() => setPredView('prediction')}>
                   Prediction
@@ -379,6 +367,7 @@ export default function CatalystPage({ holdings }: Props) {
                 lockedNewsId={lockedArticle?.newsId ?? null}
                 highlightedArticleIds={activeCategoryIds.length > 0 ? activeCategoryIds : null}
                 highlightColor={activeCategoryColor}
+                selectedRange={selectedRange}
                 onHover={handleHover}
                 onRangeSelect={handleRangeSelect}
                 onArticleSelect={handleArticleSelect}
