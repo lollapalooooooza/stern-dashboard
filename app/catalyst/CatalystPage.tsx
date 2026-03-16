@@ -137,9 +137,10 @@ export default function CatalystPage({ holdings }: Props) {
         }
       })
       .catch(() => {
-        const holdingTickers = holdings.map((h) => h.ticker);
+        const holdingTickers = holdings.map((h) => h.ticker).filter(Boolean);
         if (holdingTickers.length > 0) {
           setActiveTickers(holdingTickers);
+          catalystApi.post('stocks/prefetch', { symbols: holdingTickers }).catch(() => {});
           if (!selectedSymbol) setSelectedSymbol(holdingTickers[0]);
         }
       });
