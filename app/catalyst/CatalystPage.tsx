@@ -200,7 +200,7 @@ export default function CatalystPage({ holdings }: Props) {
     setActiveCategoryColor(color ?? null);
   }, []);
 
-  function handleSelectSymbol(symbol: string) {
+  async function handleSelectSymbol(symbol: string) {
     setSelectedSymbol(symbol);
     setHoveredDate(null);
     setHoveredOhlc(null);
@@ -212,6 +212,17 @@ export default function CatalystPage({ holdings }: Props) {
     setActiveCategory(null);
     setActiveCategoryIds([]);
     setActiveCategoryColor(null);
+
+    try {
+      const res = await catalystApi.get(`stocks/${symbol}/status`);
+      if (!res.data?.has_ohlc) {
+        catalystApi.post('stocks', { symbol }).catch(console.error);
+        await waitForTickerReady(symbol);
+      }
+    } catch {
+      // If status check fails, try a best-effort refresh anyway.
+      catalystApi.post('stocks', { symbol }).catch(console.error);
+    }
   }
 
   async function waitForTickerReady(symbol: string) {
