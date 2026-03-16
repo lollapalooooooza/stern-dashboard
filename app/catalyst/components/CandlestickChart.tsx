@@ -113,11 +113,22 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
   }, [rawOhlc, viewStart, viewCount]);
 
   useEffect(() => {
-    if (!visibleOhlc.length) return;
-    const startDate = visibleOhlc[0]?.date;
-    const endDate = visibleOhlc[visibleOhlc.length - 1]?.date;
-    const filteredParticles = rawParticles.filter((p) => (!startDate || p.d >= startDate) && (!endDate || p.d <= endDate));
-    drawChart(visibleOhlc, filteredParticles);
+    if (visibleOhlc.length) {
+      const startDate = visibleOhlc[0]?.date;
+      const endDate = visibleOhlc[visibleOhlc.length - 1]?.date;
+      const filteredParticles = rawParticles.filter((p) => (!startDate || p.d >= startDate) && (!endDate || p.d <= endDate));
+      drawChart(visibleOhlc, filteredParticles);
+      return;
+    }
+
+    const svg = d3.select(svgRef.current);
+    svg.selectAll('*').remove();
+
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
   }, [visibleOhlc, rawParticles, lockedNewsId, highlightedArticleIds, highlightColor]);
 
   function drawChart(rawData: OHLCRow[], particles: Particle[]) {
