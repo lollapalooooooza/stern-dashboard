@@ -60,6 +60,8 @@ const SENTIMENT_COLOR: Record<string, string> = {
   neutral: '#00e5ff',
 };
 
+const MIN_VIEW_COUNT = 20;
+
 export default function CandlestickChart({ symbol, lockedNewsId, highlightedArticleIds, highlightColor, onHover, onRangeSelect }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -140,23 +142,30 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .domain([d3.min(data, (d) => d.low)! * 0.92, d3.max(data, (d) => d.high)! * 1.03])
       .range([height, 0]);
 
-    g.append('g')
-      .call(d3.axisLeft(y).ticks(6).tickFormat((d) => `$${Number(d).toFixed(0)}`))
-      .selectAll('text')
-      .style('fill', '#666')
-      .style('font-size', '12px');
+    const yAxis = g.append('g')
+      .call(d3.axisLeft(y).ticks(6).tickFormat((d) => `$${Number(d).toFixed(0)}`));
 
-    g.append('g')
+    yAxis.selectAll('text')
+      .style('fill', 'rgba(154, 163, 178, 0.58)')
+      .style('font-size', '11px');
+    yAxis.selectAll('.domain, .tick line').remove();
+
+    const xAxis = g.append('g')
       .attr('transform', `translate(0,${height})`)
-      .call(d3.axisBottom(x).ticks(6).tickFormat(d3.timeFormat('%b %y') as any))
-      .selectAll('text')
-      .style('fill', '#666')
-      .style('font-size', '12px');
+      .call(d3.axisBottom(x).ticks(6).tickFormat(d3.timeFormat('%b %y') as any));
 
-    g.append('g')
-      .call(d3.axisLeft(y).ticks(8).tickSize(-width).tickFormat(() => ''))
-      .selectAll('line')
-      .style('stroke', '#1a2030');
+    xAxis.selectAll('text')
+      .style('fill', 'rgba(154, 163, 178, 0.42)')
+      .style('font-size', '11px');
+    xAxis.selectAll('.domain, .tick line').remove();
+
+    const grid = g.append('g')
+      .call(d3.axisLeft(y).ticks(8).tickSize(-width).tickFormat(() => ''));
+
+    grid.selectAll('line')
+      .style('stroke', 'rgba(255,255,255,0.045)')
+      .style('stroke-width', 1);
+    grid.selectAll('.domain').remove();
 
     const candleWidth = Math.max(1.5, (width / data.length) * 0.65);
 
@@ -281,32 +290,18 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
 
   function handleZoomOut() {
     if (total <= 1) return;
-    const nextCount = Math.min(total, Math.ceil(currentCount / 0.7));
+    const nextCount = Math.min(total, Math.ceil(currentCount / 0.72));
     const center = viewStart + currentCount / 2;
     const maxStart = Math.max(0, total - nextCount);
     setViewCount(nextCount);
     setViewStart(Math.max(0, Math.min(maxStart, Math.round(center - nextCount / 2))));
   }
 
-  function handlePan(direction: -1 | 1) {
-    const step = Math.max(1, Math.floor(currentCount * 0.4));
-    const maxStart = Math.max(0, total - currentCount);
-    setViewStart((prev) => Math.max(0, Math.min(maxStart, prev + direction * step)));
-  }
-
-  function handleReset() {
-    setViewCount(total || null);
-    setViewStart(0);
-  }
-
   return (
     <div ref={containerRef} className="chart-container">
-      <div className="chart-toolbar">
-        <button className="chart-toolbar-btn" onClick={handleZoomIn} title="Zoom in">＋</button>
-        <button className="chart-toolbar-btn" onClick={handleZoomOut} title="Zoom out">－</button>
-        <button className="chart-toolbar-btn" onClick={() => handlePan(-1)} title="Pan left" disabled={!canPanLeft}>←</button>
-        <button className="chart-toolbar-btn" onClick={() => handlePan(1)} title="Pan right" disabled={!canPanRight}>→</button>
-        <button className="chart-toolbar-btn chart-toolbar-btn-reset" onClick={handleReset} title="Reset view">Reset</button>
+      <div className="chart-toolbar chart-toolbar-minimal">
+        <button className="chart-toolbar-btn" onClick={handleZoomIn} title="Zoom in" aria-label="Zoom in">＋</button>
+        <button className="chart-toolbar-btn" onClick={handleZoomOut} title="Zoom out" aria-label="Zoom out">－</button>
       </div>
       {loading && (
         <div className="chart-loading-skeleton">
@@ -321,22 +316,19 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       <svg ref={svgRef}></svg>
       <canvas ref={canvasRef} className="particle-layer" />
       <div ref={tooltipRef} className="particle-tooltip" style={{ display: 'none' }} />
-      <div className="chart-timeline-wrap">
-        <input
-          className="chart-timeline-slider"
-          type="range"
-          min={0}
-          max={Math.max(0, total - currentCount)}
-          step={1}
-          value={Math.min(viewStart, Math.max(0, total - currentCount))}
-          onChange={(e) => setViewStart(Number(e.target.value))}
-        />
-        <div className="chart-timeline-labels">
-          <span>Earlier</span>
-          <span>Timeline</span>
-          <span>Later</span>
+      {total > currentCount && (
+        <div className="chart-timeline-overlay" aria-hidden="true">
+          <input
+            className="chart-timeline-slider chart-timeline-slider-minimal"
+            type="range"
+            min={0}
+            max={Math.max(0, total - currentCount)}
+            step={1}
+            value={Math.min(viewStart, Math.max(0, total - currentCount))}
+            onChange={(e) => setViewStart(Number(e.target.value))}
+          />
         </div>
-      </div>
+      )}
     </div>
   );
 }
