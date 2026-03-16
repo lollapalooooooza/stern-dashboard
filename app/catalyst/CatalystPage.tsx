@@ -293,7 +293,6 @@ export default function CatalystPage({ holdings }: Props) {
             setSelectedRange(null);
             setPredView('prediction');
           }}
-          onAskAI={handleRangeAsk}
         />
       );
     }
