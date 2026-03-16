@@ -41,6 +41,12 @@ interface Props {
   onAskAI: (question: string) => void;
 }
 
+const PRESET_QUESTIONS = [
+  "What's driving the price movement?",
+  'Summarize key news in this period',
+  'What are the bull/bear factors?',
+];
+
 function pct(v: number | null) {
   if (v === null || v === undefined) return '-';
   const p = v * 100;
@@ -52,6 +58,7 @@ export default function RangeNewsPanel({ symbol, startDate, endDate, priceChange
   const [data, setData] = useState<RangeNewsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [question, setQuestion] = useState('');
 
   useEffect(() => {
     setLoading(true);
@@ -82,6 +89,48 @@ export default function RangeNewsPanel({ symbol, startDate, endDate, priceChange
         {data && <span className="news-count" style={{ marginLeft: 8 }}>{data.total} articles</span>}
       </div>
 
+      <div className="range-ask-box" style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <div style={{ fontSize: 13, color: '#8ea0c7', marginBottom: 8 }}>Ask AI about this selected range</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+          {PRESET_QUESTIONS.map((q) => (
+            <button
+              key={q}
+              className="range-news-all-btn"
+              style={{ width: 'auto', padding: '6px 10px' }}
+              onClick={() => onAskAI(q)}
+            >
+              {q}
+            </button>
+          ))}
+        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (question.trim()) onAskAI(question.trim());
+          }}
+          style={{ display: 'flex', gap: 8 }}
+        >
+          <input
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Ask your own question..."
+            style={{
+              flex: 1,
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              color: '#e6ecff',
+              borderRadius: 8,
+              padding: '8px 10px',
+              fontSize: 14,
+              outline: 'none',
+            }}
+          />
+          <button type="submit" className="range-news-ai-btn" style={{ marginTop: 0, width: 'auto', padding: '8px 12px' }}>
+            Ask
+          </button>
+        </form>
+      </div>
+
       {loading ? (
         <div className="news-empty">
           <div className="range-loading">
@@ -93,37 +142,27 @@ export default function RangeNewsPanel({ symbol, startDate, endDate, priceChange
         <div className="news-empty">No news in this range</div>
       ) : (
         <div className="news-list">
-          {/* Bullish section */}
           {data.top_bullish.length > 0 && (
             <div className="range-news-section">
-              <div className="range-news-section-title bullish">
-                ▲ Bullish News ({data.top_bullish.length})
-              </div>
+              <div className="range-news-section-title bullish">▲ Bullish News ({data.top_bullish.length})</div>
               {data.top_bullish.map((item) => (
                 <RangeNewsCard key={item.news_id} item={item} />
               ))}
             </div>
           )}
 
-          {/* Bearish section */}
           {data.top_bearish.length > 0 && (
             <div className="range-news-section">
-              <div className="range-news-section-title bearish">
-                ▼ Bearish News ({data.top_bearish.length})
-              </div>
+              <div className="range-news-section-title bearish">▼ Bearish News ({data.top_bearish.length})</div>
               {data.top_bearish.map((item) => (
                 <RangeNewsCard key={item.news_id} item={item} />
               ))}
             </div>
           )}
 
-          {/* All news toggle */}
           {data.articles.length > 0 && (
             <div className="range-news-all">
-              <button
-                className="range-news-all-btn"
-                onClick={() => setShowAll(!showAll)}
-              >
+              <button className="range-news-all-btn" onClick={() => setShowAll(!showAll)}>
                 {showAll ? 'Hide' : 'Show'} all {data.total} articles
                 <span className="range-news-all-arrow">{showAll ? '▲' : '▼'}</span>
               </button>
@@ -133,11 +172,7 @@ export default function RangeNewsPanel({ symbol, startDate, endDate, priceChange
             </div>
           )}
 
-          {/* Ask AI button */}
-          <button
-            className="range-news-ai-btn"
-            onClick={() => onAskAI("What's driving the price movement?")}
-          >
+          <button className="range-news-ai-btn" onClick={() => onAskAI("What's driving the price movement?")}>
             Ask CatalystTracker
           </button>
         </div>
@@ -159,9 +194,7 @@ function RangeNewsCard({ item }: { item: NewsItem }) {
         </a>
       </div>
 
-      {item.key_discussion && (
-        <p className="news-summary">{item.key_discussion}</p>
-      )}
+      {item.key_discussion && <p className="news-summary">{item.key_discussion}</p>}
 
       {(item.reason_growth || item.reason_decrease) && (
         <div className="news-reasons">
