@@ -1,5 +1,7 @@
 "use client";
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import dynamic from 'next/dynamic';
+const CatalystPage = dynamic(() => import('./catalyst/CatalystPage'), { ssr: false });
 import {
   PieChart, Pie, Cell, BarChart, Bar, LineChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area
@@ -554,8 +556,8 @@ function SettingsPage({ settings, setSettings, holdings, setHoldings, weeklyHist
 const NAV = [
   {id:"overview",label:"Overview",icon:Home},{id:"holdings",label:"Holdings",icon:Briefcase},
   {id:"returns",label:"Returns",icon:TrendingUp},{id:"risk",label:"Risk",icon:Shield},
-  {id:"stoploss",label:"Stop-Loss",icon:AlertTriangle},{id:"report",label:"Report",icon:PenLine},
-  {id:"settings",label:"Settings",icon:Settings},
+  {id:"stoploss",label:"Stop-Loss",icon:AlertTriangle},{id:"catalyst",label:"Catalyst",icon:Activity},
+  {id:"report",label:"Report",icon:PenLine},{id:"settings",label:"Settings",icon:Settings},
 ];
 
 export default function App() {
@@ -594,7 +596,7 @@ export default function App() {
             <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"/><span className="text-xs text-slate-500">DB</span></div>
           </div>
         </header>
-        <main className="flex-1 overflow-y-auto p-6 print:p-0">
+        <main className={`flex-1 overflow-y-auto ${page==='catalyst'?'p-0':'p-6'} print:p-0`}>
           {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
           {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
           {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
@@ -602,6 +604,7 @@ export default function App() {
           {page==="stoploss" && <StopLossPage holdings={db.holdings} settings={db.settings}/>}
           {page==="report" && <TeamReportPage holdings={db.holdings} settings={db.settings} report={db.report} setReport={db.setReport} reportMeta={db.reportMeta} setReportMeta={db.setReportMeta}/>}
           {page==="settings" && <SettingsPage settings={db.settings} setSettings={db.setSettings} holdings={db.holdings} setHoldings={db.setHoldings} weeklyHistory={db.weeklyHistory} setWeeklyHistory={db.setWeeklyHistory} group={group}/>}
+          {page==="catalyst" && <CatalystPage holdings={db.holdings}/>}
         </main>
       </div>
     </div>
