@@ -277,7 +277,7 @@ export default function CatalystPage({ holdings }: Props) {
   }
 
   return (
-    <div className="catalyst-wrapper">
+    <div className="catalyst-wrapper" style={{ height: '100%', minHeight: 0 }}>
       <div className="app">
         <header className="app-header">
           <div className="header-gradient-line" />
