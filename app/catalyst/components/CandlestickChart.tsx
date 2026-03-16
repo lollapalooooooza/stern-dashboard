@@ -167,23 +167,28 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .style('stroke-width', 1);
     grid.selectAll('.domain').remove();
 
-    const candleWidth = Math.max(1.5, (width / data.length) * 0.65);
+    const line = d3.line<typeof data[number]>()
+      .x((d) => x(d.date))
+      .y((d) => y(d.close))
+      .curve(d3.curveMonotoneX);
 
-    const candles = g.selectAll('.candle').data(data).enter().append('g').attr('class', 'candle');
+    g.append('path')
+      .datum(data)
+      .attr('fill', 'none')
+      .attr('stroke', 'rgba(255,255,255,0.16)')
+      .attr('stroke-width', 4)
+      .attr('stroke-linecap', 'round')
+      .attr('stroke-linejoin', 'round')
+      .attr('d', line);
 
-    candles.append('line')
-      .attr('x1', (d) => x(d.date))
-      .attr('x2', (d) => x(d.date))
-      .attr('y1', (d) => y(d.high))
-      .attr('y2', (d) => y(d.low))
-      .attr('stroke', (d) => (d.close >= d.open ? '#00e676' : '#ff5252'));
-
-    candles.append('rect')
-      .attr('x', (d) => x(d.date) - candleWidth / 2)
-      .attr('y', (d) => y(Math.max(d.open, d.close)))
-      .attr('width', candleWidth)
-      .attr('height', (d) => Math.max(1, Math.abs(y(d.open) - y(d.close))))
-      .attr('fill', (d) => (d.close >= d.open ? '#00e676' : '#ff5252'));
+    g.append('path')
+      .datum(data)
+      .attr('fill', 'none')
+      .attr('stroke', '#f4f7fb')
+      .attr('stroke-width', 2)
+      .attr('stroke-linecap', 'round')
+      .attr('stroke-linejoin', 'round')
+      .attr('d', line);
 
     const dpr = window.devicePixelRatio || 1;
     canvasEl.width = fullWidth * dpr;
