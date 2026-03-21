@@ -1,34 +1,61 @@
-// app/api/news/route.js — Better coverage for all tickers including small-caps
+// app/api/news/route.js — Enhanced coverage for all tickers including small-caps
 // Searches by COMPANY NAME (not just ticker symbol) for much better results
+// Expanded ticker coverage (62+ holdings), parallel searches, and multi-strategy fallbacks
 
-// Map tickers to company names for better Google News results
+// Map tickers to company names for better Google News results (~62 active holdings)
 const TICKER_NAMES = {
+  // Digital Infrastructure & Data Centers
   BE: "Bloom Energy", LITE: "Lumentum Holdings", APP: "AppLovin", CSIQ: "Canadian Solar",
   NBIS: "Nebius Group", IREN: "Iris Energy", APLD: "Applied Digital", VRT: "Vertiv Holdings",
-  DBRG: "DigitalBridge", CIEN: "Ciena Corp", AWK: "American Water Works", XYL: "Xylem water",
+  DBRG: "DigitalBridge", CIEN: "Ciena Corp", AWK: "American Water Works", XYL: "Xylem",
   NEE: "NextEra Energy", PWR: "Quanta Services", DLR: "Digital Realty", EQIX: "Equinix",
+
+  // Experientials & Travel
   ABNB: "Airbnb", LYV: "Live Nation", MSGE: "MSG Entertainment", NCLH: "Norwegian Cruise",
   RCL: "Royal Caribbean", TKO: "TKO Group WWE", MAR: "Marriott", H: "Hyatt Hotels",
-  BWXT: "BWX Technologies nuclear", EXC: "Exelon nuclear", GE: "GE Aerospace",
-  AXP: "American Express", MA: "Mastercard", V: "Visa payments",
-  ALRM: "Alarm.com", MSI: "Motorola Solutions", OSIS: "OSI Systems security", RTX: "RTX Raytheon defense",
-  ABBV: "AbbVie pharma", ABT: "Abbott Labs", ADUS: "Addus HomeCare", AMGN: "Amgen biotech",
-  DXCM: "DexCom diabetes", EHAB: "Enhabit Home Health", LLY: "Eli Lilly obesity GLP-1",
-  MDT: "Medtronic devices", SYK: "Stryker orthopedic", TNL: "Travel Leisure vacation",
-  VTR: "Ventas healthcare REIT", WELL: "Welltower senior housing",
-  CLH: "Clean Harbors waste", DAR: "Darling Ingredients rendering", RSG: "Republic Services waste",
-  TTEK: "Tetra Tech environmental", WM: "Waste Management",
-  NOW: "ServiceNow software", RDDT: "Reddit social media", SNOW: "Snowflake cloud data",
-  BABA: "Alibaba China AI", GOOG: "Google Alphabet AI", NVDA: "NVIDIA AI chips",
-  TSLA: "Tesla electric vehicle", TSM: "TSMC semiconductor",
-  DIS: "Disney entertainment", SPY: "S&P 500 index",
+
+  // Nuclear & Security
+  BWXT: "BWX Technologies", EXC: "Exelon", GE: "GE Aerospace", DEF: "Defiance Technologies",
+
+  // Payments
+  AXP: "American Express", MA: "Mastercard", V: "Visa", PYPL: "PayPal",
+
+  // Security & Defense
+  ALRM: "Alarm.com", MSI: "Motorola Solutions", OSIS: "OSI Systems", RTX: "Raytheon",
+  LMAB: "Lemonade Insurance", CG: "Carlyle Group",
+
+  // Healthcare & Biotech
+  ABBV: "AbbVie", ABT: "Abbott Labs", ADUS: "Addus HomeCare", AMGN: "Amgen",
+  DXCM: "DexCom", EHAB: "Enhabit", LLY: "Eli Lilly", MDT: "Medtronic",
+  SYK: "Stryker", VTR: "Ventas", WELL: "Welltower",
+
+  // Healthcare Legacy (Silver Economy)
+  TNL: "Travel Leisure", CVS: "CVS Health", UNH: "UnitedHealth",
+
+  // Waste & Environmental
+  CLH: "Clean Harbors", DAR: "Darling Ingredients", RSG: "Republic Services", WM: "Waste Management",
+  TTEK: "Tetra Tech", PSTG: "Pure Storage", ETR: "Entergy",
+
+  // Legacy Software & Cloud
+  NOW: "ServiceNow", RDDT: "Reddit", SNOW: "Snowflake", CRWD: "CrowdStrike",
+  MDB: "MongoDB", PLTR: "Palantir", CRM: "Salesforce", IBM: "IBM",
+
+  // Battery & EV
+  TSLA: "Tesla", RUM: "Rumble", RIVN: "Rivian",
+
+  // AI & Semiconductors
+  BABA: "Alibaba", GOOG: "Google", NVDA: "NVIDIA", TSM: "TSMC", QCOM: "Qualcomm",
+  ARM: "ARM Holdings", MU: "Micron", AVGO: "Broadcom",
+
+  // Diversified
+  DIS: "Disney", SPY: "S&P 500", BRK: "Berkshire Hathaway", MSFT: "Microsoft",
 };
 
 function getSearchName(ticker) {
   return TICKER_NAMES[ticker] || ticker;
 }
 
-async function fetchRSS(query, timeout = 6000) {
+async function fetchRSS(query, timeout = 4000) {
   try {
     const resp = await fetch(
       `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`,
@@ -39,7 +66,7 @@ async function fetchRSS(query, timeout = 6000) {
     const items = [];
     const re = /<item>([\s\S]*?)<\/item>/g;
     let m;
-    while ((m = re.exec(xml)) !== null && items.length < 5) {
+    while ((m = re.exec(xml)) !== null && items.length < 8) {
       const item = m[1];
       const gt = tag => { const r = new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?</${tag}>`); const x = item.match(r); return x ? x[1].trim().replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"') : ""; };
       const title = gt("title");
@@ -65,33 +92,53 @@ export async function POST(request) {
 
     // Build multiple search queries for better coverage
     const queries = [];
+    const tickerSet = new Set(tickers);
 
-    // Query 1-3: Search by COMPANY NAME (much better for small-caps)
+    // Strategy 1: Search by COMPANY NAME in batches of 3 (more specific results)
     const nameQueries = [];
-    for (let i = 0; i < Math.min(tickers.length, 12); i += 4) {
-      const batch = tickers.slice(i, i + 4).map(t => getSearchName(t)).join(" OR ");
+    for (let i = 0; i < Math.min(tickers.length, 62); i += 3) {
+      const batch = tickers.slice(i, i + 3).map(t => getSearchName(t)).join(" OR ");
       nameQueries.push(batch);
     }
+    queries.push(...nameQueries);
 
-    // Query 4: Search by ticker symbols for well-known ones
-    const famousTickers = tickers.filter(t => ["NVDA", "TSLA", "GOOG", "BABA", "DIS", "ABNB", "LLY", "AMGN", "MA", "V", "GE", "SNOW", "NOW", "RDDT"].includes(t));
-    if (famousTickers.length > 0) {
-      queries.push(famousTickers.slice(0, 6).map(t => `$${t} stock`).join(" OR "));
+    // Strategy 2: Individual searches for less-famous small-cap tickers
+    const smallCapTickers = tickers.filter(t =>
+      !["NVDA", "TSLA", "GOOG", "BABA", "DIS", "ABNB", "LLY", "AMGN", "MA", "V", "GE", "SNOW", "NOW", "RDDT", "MSFT", "IBM", "CRM", "CRWD", "PLTR", "ARM", "TSM", "QCOM"].includes(t)
+    );
+    for (const ticker of smallCapTickers.slice(0, 20)) {
+      queries.push(`${getSearchName(ticker)} stock`);
     }
 
-    // Query 5: Theme-based searches for broader coverage
-    queries.push("AI data center infrastructure energy stock market");
-    queries.push("healthcare biotech pharma GLP-1 stock");
+    // Strategy 3: Famous ticker symbol searches for quick hits
+    const famousTickers = tickers.filter(t => ["NVDA", "TSLA", "GOOG", "BABA", "DIS", "ABNB", "LLY", "AMGN", "MA", "V", "GE", "SNOW", "NOW", "RDDT"].includes(t));
+    if (famousTickers.length > 0) {
+      queries.push(famousTickers.slice(0, 8).map(t => `$${t} stock`).join(" OR "));
+    }
 
-    // Fire ALL queries in parallel
-    const allQueries = [...nameQueries, ...queries];
+    // Strategy 4: Theme-based searches covering ALL themes
+    const themeQueries = [
+      "AI data center infrastructure energy stock",
+      "nuclear power energy generation stock",
+      "cybersecurity defense security stock",
+      "waste management environmental recycling stock",
+      "digital infrastructure cloud data center",
+      "payments fintech payment processing",
+      "biotech pharma GLP-1 healthcare stock",
+      "silver economy aging healthcare senior stock",
+      "legacy software enterprise software cloud",
+      "battery electric vehicle EV stock",
+      "experiential entertainment travel hospitality",
+    ];
+    queries.push(...themeQueries);
+
+    // Fire ALL queries in parallel with 4s timeout
     const allResults = await Promise.allSettled(
-      allQueries.map(q => fetchRSS(q, 5000))
+      queries.map(q => fetchRSS(q, 4000))
     );
 
     // Collect and tag results with matching tickers
     const allNews = [];
-    const tickerUpper = new Set(tickers.map(t => t.toUpperCase()));
     const tickerNames = {};
     for (const t of tickers) {
       tickerNames[t] = (TICKER_NAMES[t] || t).toLowerCase().split(/\s+/);
@@ -111,17 +158,21 @@ export async function POST(request) {
             matched.push(t);
             continue;
           }
-          // Check company name keywords (at least 2 words must match for multi-word names)
+          // Check company name keywords
           const nameWords = tickerNames[t];
           if (nameWords.length === 1) {
-            if (lowerTitle.includes(nameWords[0]) && nameWords[0].length > 3) matched.push(t);
+            // Single-word names: require length > 2 (not 3)
+            if (lowerTitle.includes(nameWords[0]) && nameWords[0].length > 2) matched.push(t);
           } else {
+            // Multi-word names: at least 2 words must match
             const matchCount = nameWords.filter(w => w.length > 2 && lowerTitle.includes(w)).length;
             if (matchCount >= 2) matched.push(t);
           }
         }
 
-        allNews.push({ ...item, tickers: [...new Set(matched)].slice(0, 4) });
+        if (matched.length > 0) {
+          allNews.push({ ...item, tickers: [...new Set(matched)].slice(0, 4) });
+        }
       }
     }
 
@@ -137,7 +188,8 @@ export async function POST(request) {
     // Sort: items with matched tickers first, then by relevance
     unique.sort((a, b) => (b.tickers.length - a.tickers.length));
 
-    return Response.json({ news: unique.slice(0, 15), count: unique.length, queries: allQueries.length, ms: Date.now() - t0 });
+    // Return 30 results (increased from 15)
+    return Response.json({ news: unique.slice(0, 30), count: unique.length, queries: queries.length, ms: Date.now() - t0 });
   } catch (e) {
     return Response.json({ news: [], error: e.message, ms: Date.now() - t0 }, { status: 500 });
   }

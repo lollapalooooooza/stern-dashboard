@@ -3,6 +3,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { catalystApi } from '../api';
 
+// Cache for storing chart data
+const chartDataCache = new Map<string, { ohlc: OHLCRow[]; particles: Particle[] }>();
+const prefetchTimeouts = new Map<string, NodeJS.Timeout>();
+
 interface OHLCRow {
   date: string;
   open: number;
@@ -56,9 +60,9 @@ interface Props {
 }
 
 const SENTIMENT_COLOR: Record<string, string> = {
-  positive: '#00e676',
-  negative: '#ff5252',
-  neutral: '#00e5ff',
+  positive: '#16a34a',
+  negative: '#dc2626',
+  neutral: '#2563eb',
 };
 
 const MIN_VIEW_COUNT = 20;
@@ -76,35 +80,90 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
   const summaryCacheRef = useRef<Map<string, string>>(new Map());
   const [viewStart, setViewStart] = useState(0);
   const [viewCount, setViewCount] = useState<number | null>(null);
+  const retryCountRef = useRef(0);
 
   useEffect(() => {
     if (!symbol) return;
     const reqId = ++requestSeqRef.current;
+    retryCountRef.current = 0;
     setLoading(true);
     setRawOhlc([]);
     setRawParticles([]);
     setViewCount(null);
     setViewStart(0);
 
-    Promise.all([
-      catalystApi.get<OHLCRow[]>(`stocks/${symbol}/ohlc`),
-      catalystApi.get<Particle[]>(`news/${symbol}/particles`),
-    ])
-      .then(([ohlcRes, particlesRes]) => {
+    // Prefetch data for less-famous tickers
+    const prefetchTimeout = setTimeout(() => {
+      if (reqId === requestSeqRef.current && !chartDataCache.has(symbol)) {
+        catalystApi.get<OHLCRow[]>(`stocks/${symbol}/ohlc`)
+          .then((ohlcRes) => {
+            if (ohlcRes.data && ohlcRes.data.length > 0) {
+              const cached = chartDataCache.get(symbol) || { ohlc: [], particles: [] };
+              cached.ohlc = ohlcRes.data;
+              chartDataCache.set(symbol, cached);
+            }
+          })
+          .catch(() => {});
+      }
+    }, 100);
+    prefetchTimeouts.set(symbol, prefetchTimeout);
+
+    const loadData = () => {
+      // Check cache first
+      const cached = chartDataCache.get(symbol);
+      if (cached && cached.ohlc.length > 0 && cached.particles.length > 0) {
         if (reqId !== requestSeqRef.current) return;
-        const nextOhlc = ohlcRes.data || [];
-        setRawOhlc(nextOhlc);
-        setRawParticles(particlesRes.data || []);
-        setViewCount(nextOhlc.length || null);
+        setRawOhlc(cached.ohlc);
+        setRawParticles(cached.particles);
+        setViewCount(cached.ohlc.length || null);
         setViewStart(0);
-      })
-      .catch((err) => {
-        if (reqId !== requestSeqRef.current) return;
-        console.error('Chart error:', err);
-      })
-      .finally(() => {
-        if (reqId === requestSeqRef.current) setLoading(false);
-      });
+        setLoading(false);
+        return;
+      }
+
+      Promise.all([
+        catalystApi.get<OHLCRow[]>(`stocks/${symbol}/ohlc`),
+        catalystApi.get<Particle[]>(`news/${symbol}/particles`),
+      ])
+        .then(([ohlcRes, particlesRes]) => {
+          if (reqId !== requestSeqRef.current) return;
+          const nextOhlc = ohlcRes.data || [];
+          const nextParticles = particlesRes.data || [];
+          setRawOhlc(nextOhlc);
+          setRawParticles(nextParticles);
+          setViewCount(nextOhlc.length || null);
+          setViewStart(0);
+          // Update cache
+          chartDataCache.set(symbol, { ohlc: nextOhlc, particles: nextParticles });
+        })
+        .catch((err) => {
+          if (reqId !== requestSeqRef.current) return;
+          console.error('Chart error:', err);
+          // Retry once after 2 seconds
+          if (retryCountRef.current < 1) {
+            retryCountRef.current++;
+            setTimeout(() => {
+              if (reqId === requestSeqRef.current) {
+                loadData();
+              }
+            }, 2000);
+          } else {
+            setLoading(false);
+          }
+        })
+        .finally(() => {
+          if (reqId === requestSeqRef.current) setLoading(false);
+        });
+    };
+
+    loadData();
+
+    return () => {
+      if (prefetchTimeouts.has(symbol)) {
+        clearTimeout(prefetchTimeouts.get(symbol)!);
+        prefetchTimeouts.delete(symbol);
+      }
+    };
   }, [symbol]);
 
   const visibleOhlc = useMemo(() => {
@@ -169,7 +228,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .call(d3.axisLeft(y).ticks(6).tickFormat((d) => `$${Number(d).toFixed(0)}`));
 
     yAxis.selectAll('text')
-      .style('fill', 'rgba(154, 163, 178, 0.58)')
+      .style('fill', 'rgba(71, 85, 105, 0.7)')
       .style('font-size', '11px');
     yAxis.selectAll('.domain, .tick line').remove();
 
@@ -178,7 +237,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .call(d3.axisBottom(x).ticks(6).tickFormat(d3.timeFormat('%b %y') as any));
 
     xAxis.selectAll('text')
-      .style('fill', 'rgba(154, 163, 178, 0.42)')
+      .style('fill', 'rgba(71, 85, 105, 0.7)')
       .style('font-size', '11px');
     xAxis.selectAll('.domain, .tick line').remove();
 
@@ -186,7 +245,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .call(d3.axisLeft(y).ticks(8).tickSize(-width).tickFormat(() => ''));
 
     grid.selectAll('line')
-      .style('stroke', 'rgba(255,255,255,0.045)')
+      .style('stroke', 'rgba(0,0,0,0.06)')
       .style('stroke-width', 1);
     grid.selectAll('.domain').remove();
 
@@ -197,9 +256,9 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .attr('y1', '0%')
       .attr('x2', '0%')
       .attr('y2', '100%');
-    areaGradient.append('stop').attr('offset', '0%').attr('stop-color', '#00e676').attr('stop-opacity', 0.12);
-    areaGradient.append('stop').attr('offset', '55%').attr('stop-color', '#00e676').attr('stop-opacity', 0.04);
-    areaGradient.append('stop').attr('offset', '100%').attr('stop-color', '#00e676').attr('stop-opacity', 0);
+    areaGradient.append('stop').attr('offset', '0%').attr('stop-color', '#16a34a').attr('stop-opacity', 0.12);
+    areaGradient.append('stop').attr('offset', '55%').attr('stop-color', '#16a34a').attr('stop-opacity', 0.04);
+    areaGradient.append('stop').attr('offset', '100%').attr('stop-color', '#16a34a').attr('stop-opacity', 0);
 
     const line = d3.line<typeof data[number]>()
       .x((d) => x(d.date))
@@ -226,8 +285,8 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
           .attr('y1', '0%')
           .attr('x2', '0%')
           .attr('y2', '100%');
-        rangeAreaGradient.append('stop').attr('offset', '0%').attr('stop-color', '#24e07a').attr('stop-opacity', 0.22);
-        rangeAreaGradient.append('stop').attr('offset', '100%').attr('stop-color', '#24e07a').attr('stop-opacity', 0.03);
+        rangeAreaGradient.append('stop').attr('offset', '0%').attr('stop-color', '#16a34a').attr('stop-opacity', 0.22);
+        rangeAreaGradient.append('stop').attr('offset', '100%').attr('stop-color', '#16a34a').attr('stop-opacity', 0.03);
         g.append('path')
           .datum(selectedData)
           .attr('fill', 'url(#sd-selected-range-gradient)')
@@ -238,7 +297,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     g.append('path')
       .datum(data)
       .attr('fill', 'none')
-      .attr('stroke', 'rgba(0, 230, 118, 0.15)')
+      .attr('stroke', 'rgba(22, 163, 74, 0.15)')
       .attr('stroke-width', 6)
       .attr('stroke-linecap', 'round')
       .attr('stroke-linejoin', 'round')
@@ -247,7 +306,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     g.append('path')
       .datum(data)
       .attr('fill', 'none')
-      .attr('stroke', '#17d96c')
+      .attr('stroke', '#16a34a')
       .attr('stroke-width', 2.25)
       .attr('stroke-linecap', 'round')
       .attr('stroke-linejoin', 'round')
@@ -277,7 +336,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
           const desiredPy = margin.top + y(day.close) + 10 + idx * 6;
           const py = Math.min(desiredPy, particleBottomLimit);
           const overflow = Math.max(0, desiredPy - particleBottomLimit);
-          const densityAlpha = overflow > 0 ? Math.max(0.1, 0.34 - overflow / 42) : 0.34;
+          const densityAlpha = overflow > 0 ? Math.max(0.1, 0.5 - overflow / 42) : 0.5;
           const isHighlighted = !!highlighted?.has(p.id);
           const radius = p.id === lockedNewsId ? 4.5 : isHighlighted ? 4 : 3;
           const color = isHighlighted && highlightColor ? highlightColor : SENTIMENT_COLOR[p.s || 'neutral'] || '#666';
@@ -292,11 +351,11 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     }
 
     const bisect = d3.bisector<typeof data[0], Date>((d) => d.date).left;
-    const hoverBand = g.append('rect').attr('y', 0).attr('height', height).attr('rx', 10).attr('fill', 'rgba(255,255,255,0.04)').attr('stroke', 'rgba(255,255,255,0.04)').style('display', 'none').style('pointer-events', 'none');
-    const crossV = g.append('line').style('stroke', 'rgba(255,255,255,0.18)').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
-    const crossH = g.append('line').style('stroke', 'rgba(255,255,255,0.12)').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
-    const hoverGlow = g.append('circle').attr('r', 10).attr('fill', 'rgba(23, 217, 108, 0.18)').style('display', 'none');
-    const hoverDot = g.append('circle').attr('r', 3.5).attr('fill', '#17d96c').attr('stroke', 'rgba(6, 12, 18, 0.95)').attr('stroke-width', 1.2).style('display', 'none');
+    const hoverBand = g.append('rect').attr('y', 0).attr('height', height).attr('rx', 10).attr('fill', 'rgba(0,0,0,0.04)').attr('stroke', 'rgba(0,0,0,0.04)').style('display', 'none').style('pointer-events', 'none');
+    const crossV = g.append('line').style('stroke', 'rgba(0,0,0,0.15)').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
+    const crossH = g.append('line').style('stroke', 'rgba(0,0,0,0.15)').style('stroke-width', 0.5).style('stroke-dasharray', '4,3').style('display', 'none');
+    const hoverGlow = g.append('circle').attr('r', 10).attr('fill', 'rgba(22, 163, 74, 0.18)').style('display', 'none');
+    const hoverDot = g.append('circle').attr('r', 3.5).attr('fill', '#16a34a').attr('stroke', 'rgba(255, 255, 255, 0.95)').attr('stroke-width', 1.2).style('display', 'none');
 
     function snapToData(px: number) {
       const xDate = x.invert(px);
