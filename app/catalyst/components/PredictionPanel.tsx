@@ -121,7 +121,7 @@ function extractKeywords(headlines: Headline[]): string[] {
   return Array.from(freq.entries())
     .filter(([, c]) => c >= 2)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 12)
+    .slice(0, 3)
     .map(([w]) => w);
 }
 

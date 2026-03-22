@@ -9,6 +9,7 @@ import RangeAnalysisPanel from './components/RangeAnalysisPanel';
 import RangeNewsPanel from './components/RangeNewsPanel';
 import SimilarDaysPanel from './components/SimilarDaysPanel';
 import PredictionPanel from './components/PredictionPanel';
+import AiChatPanel from './components/AiChatPanel';
 import ToastContainer from './components/Toast';
 import './catalyst.css';
 
@@ -43,11 +44,7 @@ const RANGE_PRESETS = [
 ];
 
 export default function CatalystPage({ holdings }: Props) {
-  const [theme, setTheme] = useState<'dark'|'light'>(() => {
-    try {
-      return (localStorage.getItem('ct-theme') as 'dark'|'light') || 'dark';
-    } catch { return 'dark'; }
-  });
+  const theme = 'dark';
   const [activeTickers, setActiveTickers] = useState<string[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [hoveredDate, setHoveredDate] = useState<string | null>(null);
@@ -70,7 +67,7 @@ export default function CatalystPage({ holdings }: Props) {
   const [tickerLoading, setTickerLoading] = useState(false);
   const [tickerLoadingMessage, setTickerLoadingMessage] = useState('');
   const [tickerSwitching, setTickerSwitching] = useState(false);
-  const [predView, setPredView] = useState<'prediction' | 'ask'>('prediction');
+  const [predView, setPredView] = useState<'prediction' | 'ask' | 'ai-chat'>('prediction');
   const [customRangeQuestion, setCustomRangeQuestion] = useState('');
 
   const [watchlist, setWatchlist] = useState<string[]>(() => {
@@ -96,10 +93,6 @@ export default function CatalystPage({ holdings }: Props) {
   useEffect(() => {
     localStorage.setItem('ct-watchlist', JSON.stringify(watchlist));
   }, [watchlist]);
-
-  useEffect(() => {
-    localStorage.setItem('ct-theme', theme);
-  }, [theme]);
 
   const toggleWatchlist = useCallback((sym: string) => {
     setWatchlist((prev) => (prev.includes(sym) ? prev.filter((s) => s !== sym) : [...prev, sym]));
@@ -337,14 +330,7 @@ export default function CatalystPage({ holdings }: Props) {
   }
 
   return (
-    <div className={`catalyst-wrapper ${theme === 'light' ? 'light-theme' : ''}`} style={{ height: '100%', minHeight: 0 }}>
-      <button
-        className="theme-toggle-btn"
-        onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-      >
-        {theme === 'dark' ? '☀️' : '🌙'}
-      </button>
+    <div className="catalyst-wrapper" style={{ height: '100%', minHeight: 0 }}>
       <div className="app">
         <header className="app-header">
           <div className="header-gradient-line" />
@@ -389,7 +375,10 @@ export default function CatalystPage({ holdings }: Props) {
                   Prediction
                 </button>
                 <button className={`header-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => selectedRange && setPredView('ask')} disabled={!selectedRange}>
-                  AI Question
+                  Range Q&A
+                </button>
+                <button className={`header-mode-btn ${predView === 'ai-chat' ? 'active' : ''}`} onClick={() => setPredView('ai-chat' as any)}>
+                  AI Chat
                 </button>
               </div>
             </div>
@@ -418,7 +407,9 @@ export default function CatalystPage({ holdings }: Props) {
 
           {selectedSymbol && (
             <div className="prediction-area">
-              {predView === 'ask' && selectedRange ? (
+              {predView === 'ai-chat' ? (
+                <AiChatPanel symbol={selectedSymbol} />
+              ) : predView === 'ask' && selectedRange ? (
                 rangeQuestion ? (
                   <RangeAnalysisPanel
                     key={`range-analysis-inline-${selectedSymbol}-${selectedRange.startDate}-${selectedRange.endDate}`}

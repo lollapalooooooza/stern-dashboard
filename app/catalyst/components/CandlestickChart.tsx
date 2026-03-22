@@ -459,16 +459,26 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       <svg ref={svgRef}></svg>
       <canvas ref={canvasRef} className="particle-layer" />
       <div ref={tooltipRef} className="particle-tooltip" style={{ display: 'none' }} />
-      {total > currentCount && (
+      {total > MIN_VIEW_COUNT && (
         <div className="chart-timeline-overlay" aria-hidden="true">
           <input
             className="chart-timeline-slider chart-timeline-slider-minimal"
             type="range"
             min={0}
-            max={Math.max(0, total - currentCount)}
+            max={Math.max(0, total - Math.min(currentCount, total))}
             step={1}
             value={Math.min(viewStart, Math.max(0, total - currentCount))}
-            onChange={(e) => setViewStart(Number(e.target.value))}
+            onChange={(e) => {
+              const newStart = Number(e.target.value);
+              // If at full zoom, zoom to ~60% first so slider is useful
+              if (currentCount >= total) {
+                const newCount = Math.max(MIN_VIEW_COUNT, Math.floor(total * 0.6));
+                setViewCount(newCount);
+                setViewStart(Math.min(newStart, Math.max(0, total - newCount)));
+              } else {
+                setViewStart(newStart);
+              }
+            }}
           />
         </div>
       )}
