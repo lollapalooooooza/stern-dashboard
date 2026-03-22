@@ -43,6 +43,11 @@ const RANGE_PRESETS = [
 ];
 
 export default function CatalystPage({ holdings }: Props) {
+  const [theme, setTheme] = useState<'dark'|'light'>(() => {
+    try {
+      return (localStorage.getItem('ct-theme') as 'dark'|'light') || 'dark';
+    } catch { return 'dark'; }
+  });
   const [activeTickers, setActiveTickers] = useState<string[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [hoveredDate, setHoveredDate] = useState<string | null>(null);
@@ -91,6 +96,10 @@ export default function CatalystPage({ holdings }: Props) {
   useEffect(() => {
     localStorage.setItem('ct-watchlist', JSON.stringify(watchlist));
   }, [watchlist]);
+
+  useEffect(() => {
+    localStorage.setItem('ct-theme', theme);
+  }, [theme]);
 
   const toggleWatchlist = useCallback((sym: string) => {
     setWatchlist((prev) => (prev.includes(sym) ? prev.filter((s) => s !== sym) : [...prev, sym]));
@@ -328,7 +337,14 @@ export default function CatalystPage({ holdings }: Props) {
   }
 
   return (
-    <div className="catalyst-wrapper" style={{ height: '100%', minHeight: 0 }}>
+    <div className={`catalyst-wrapper ${theme === 'light' ? 'light-theme' : ''}`} style={{ height: '100%', minHeight: 0 }}>
+      <button
+        className="theme-toggle-btn"
+        onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+      >
+        {theme === 'dark' ? '☀️' : '🌙'}
+      </button>
       <div className="app">
         <header className="app-header">
           <div className="header-gradient-line" />

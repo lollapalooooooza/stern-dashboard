@@ -5,14 +5,15 @@
 // Map tickers to company names for better Google News results (~62 active holdings)
 const TICKER_NAMES = {
   // Digital Infrastructure & Data Centers
-  BE: "Bloom Energy", LITE: "Lumentum Holdings", APP: "AppLovin", CSIQ: "Canadian Solar",
-  NBIS: "Nebius Group", IREN: "Iris Energy", APLD: "Applied Digital", VRT: "Vertiv Holdings",
+  BE: "Bloom Energy", LITE: "Lumentum Holdings", APP: "AppLovin mobile advertising", CSIQ: "Canadian Solar",
+  NBIS: "Nebius Group", IREN: "Iris Energy", APLD: "Applied Digital data center", VRT: "Vertiv Holdings",
   DBRG: "DigitalBridge", CIEN: "Ciena Corp", AWK: "American Water Works", XYL: "Xylem",
   NEE: "NextEra Energy", PWR: "Quanta Services", DLR: "Digital Realty", EQIX: "Equinix",
 
   // Experientials & Travel
   ABNB: "Airbnb", LYV: "Live Nation", MSGE: "MSG Entertainment", NCLH: "Norwegian Cruise",
   RCL: "Royal Caribbean", TKO: "TKO Group WWE", MAR: "Marriott", H: "Hyatt Hotels",
+  TNL: "Travel Leisure vacation ownership",
 
   // Nuclear & Security
   BWXT: "BWX Technologies", EXC: "Exelon", GE: "GE Aerospace", DEF: "Defiance Technologies",
@@ -21,7 +22,7 @@ const TICKER_NAMES = {
   AXP: "American Express", MA: "Mastercard", V: "Visa", PYPL: "PayPal",
 
   // Security & Defense
-  ALRM: "Alarm.com", MSI: "Motorola Solutions", OSIS: "OSI Systems", RTX: "Raytheon",
+  ALRM: "Alarm.com", MSI: "Motorola Solutions", OSIS: "OSI Systems security", RTX: "RTX Raytheon defense",
   LMAB: "Lemonade Insurance", CG: "Carlyle Group",
 
   // Healthcare & Biotech
@@ -30,14 +31,14 @@ const TICKER_NAMES = {
   SYK: "Stryker", VTR: "Ventas", WELL: "Welltower",
 
   // Healthcare Legacy (Silver Economy)
-  TNL: "Travel Leisure", CVS: "CVS Health", UNH: "UnitedHealth",
+  CVS: "CVS Health", UNH: "UnitedHealth",
 
   // Waste & Environmental
   CLH: "Clean Harbors", DAR: "Darling Ingredients", RSG: "Republic Services", WM: "Waste Management",
   TTEK: "Tetra Tech", PSTG: "Pure Storage", ETR: "Entergy",
 
   // Legacy Software & Cloud
-  NOW: "ServiceNow", RDDT: "Reddit", SNOW: "Snowflake", CRWD: "CrowdStrike",
+  NOW: "ServiceNow IT software", RDDT: "Reddit social media platform", SNOW: "Snowflake cloud data warehouse", CRWD: "CrowdStrike",
   MDB: "MongoDB", PLTR: "Palantir", CRM: "Salesforce", IBM: "IBM",
 
   // Battery & EV
@@ -48,7 +49,7 @@ const TICKER_NAMES = {
   ARM: "ARM Holdings", MU: "Micron", AVGO: "Broadcom",
 
   // Diversified
-  DIS: "Disney", SPY: "S&P 500", BRK: "Berkshire Hathaway", MSFT: "Microsoft",
+  DIS: "Disney entertainment parks", SPY: "S&P 500", BRK: "Berkshire Hathaway", MSFT: "Microsoft", AAPL: "Apple", META: "Meta Facebook",
 };
 
 function getSearchName(ticker) {
@@ -102,12 +103,11 @@ export async function POST(request) {
     }
     queries.push(...nameQueries);
 
-    // Strategy 2: Individual searches for less-famous small-cap tickers
-    const smallCapTickers = tickers.filter(t =>
-      !["NVDA", "TSLA", "GOOG", "BABA", "DIS", "ABNB", "LLY", "AMGN", "MA", "V", "GE", "SNOW", "NOW", "RDDT", "MSFT", "IBM", "CRM", "CRWD", "PLTR", "ARM", "TSM", "QCOM"].includes(t)
-    );
+    // Strategy 2: Individual searches for non-famous small-cap tickers
+    const famousSet = new Set(["NVDA", "TSLA", "GOOG", "BABA", "DIS", "ABNB", "LLY", "AMGN", "MA", "V", "GE", "SNOW", "NOW", "RDDT", "AAPL", "MSFT", "META"]);
+    const smallCapTickers = tickers.filter(t => !famousSet.has(t));
     for (const ticker of smallCapTickers.slice(0, 20)) {
-      queries.push(`${getSearchName(ticker)} stock`);
+      queries.push(`"${getSearchName(ticker)}" stock`);
     }
 
     // Strategy 3: Famous ticker symbol searches for quick hits
@@ -116,19 +116,20 @@ export async function POST(request) {
       queries.push(famousTickers.slice(0, 8).map(t => `$${t} stock`).join(" OR "));
     }
 
-    // Strategy 4: Theme-based searches covering ALL themes
+    // Strategy 4: Theme-based searches covering ALL portfolio themes
     const themeQueries = [
       "AI data center infrastructure energy stock",
-      "nuclear power energy generation stock",
-      "cybersecurity defense security stock",
-      "waste management environmental recycling stock",
-      "digital infrastructure cloud data center",
-      "payments fintech payment processing",
+      "Nuclear energy uranium power stock",
+      "Security defense surveillance stock",
+      "Waste management recycling environmental stock",
+      "Digital infrastructure data center REIT",
+      "Payments fintech credit card stock",
+      "Experientials travel cruise hotels entertainment",
+      "Battery energy storage solar stock",
+      "Legacy software cloud SaaS",
       "biotech pharma GLP-1 healthcare stock",
       "silver economy aging healthcare senior stock",
-      "legacy software enterprise software cloud",
-      "battery electric vehicle EV stock",
-      "experiential entertainment travel hospitality",
+      "cybersecurity defense security stock",
     ];
     queries.push(...themeQueries);
 
@@ -176,10 +177,10 @@ export async function POST(request) {
       }
     }
 
-    // Deduplicate by title
+    // Deduplicate by title (use first 40 chars for better dedup)
     const seen = new Set();
     const unique = allNews.filter(n => {
-      const key = n.title.substring(0, 50).toLowerCase();
+      const key = n.title.substring(0, 40).toLowerCase();
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -188,8 +189,8 @@ export async function POST(request) {
     // Sort: items with matched tickers first, then by relevance
     unique.sort((a, b) => (b.tickers.length - a.tickers.length));
 
-    // Return 30 results (increased from 15)
-    return Response.json({ news: unique.slice(0, 30), count: unique.length, queries: queries.length, ms: Date.now() - t0 });
+    // Return 25 results
+    return Response.json({ news: unique.slice(0, 25), count: unique.length, queries: queries.length, ms: Date.now() - t0 });
   } catch (e) {
     return Response.json({ news: [], error: e.message, ms: Date.now() - t0 }, { status: 500 });
   }
