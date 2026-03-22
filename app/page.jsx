@@ -166,6 +166,26 @@ function useDatabase(group) {
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [lastRefreshTime, group]);
 
+  const setHoldings = useCallback(async (newH) => {
+    setHL(newH);
+    try { await fetch("/api/holdings", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ holdings:newH, group }) }); } catch {}
+  }, [group]);
+
+  const setSettings = useCallback(async (newS) => {
+    setSL(newS);
+    try { await fetch("/api/settings", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ settings:newS, group }) }); } catch {}
+  }, [group]);
+
+  const setWeeklyHistory = useCallback(async (newW) => {
+    setWL(newW);
+    try { await fetch("/api/history", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ history:newW, group }) }); } catch {}
+  }, [group]);
+
+  const setReport = useCallback(async (c) => {
+    setRL(c);
+    try { await fetch("/api/report", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ content:c, group }) }); } catch {}
+  }, [group]);
+
   const setReportMeta = useCallback(async (m) => {
     setRML(m);
     try { await fetch("/api/report", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ content:report, meta:m, group }) }); } catch {}
@@ -250,12 +270,17 @@ function NewsFeed({ tickers }) {
 // ═══════════════════════════════════════════════════════════════════
 
 function computeHoldings(holdings) {
-  const total = holdings.reduce((s, h) => s + (h.currentPrice * h.shares), 0);
-  return holdings.map(h => ({
-    ...h,
-    value: h.currentPrice * h.shares,
-    weight: total > 0 ? (h.currentPrice * h.shares) / total : 0,
-  }));
+  const active = holdings.filter(h => h.status === "active");
+  const exited = holdings.filter(h => h.status === "exited");
+  const totalVal = active.reduce((s, h) => s + (h.currentValue || h.shares * h.currentPrice), 0);
+  const totalRealizedPnl = exited.reduce((s, h) => s + (h.realizedPnl || h.pnlFromExcel || 0), 0);
+  const totalCostBasis = active.reduce((s, h) => s + h.shares * h.buyPrice, 0) + exited.reduce((s, h) => s + (h.costBasis || h.shares * h.buyPrice || 0), 0);
+  const computed = active.map(h => {
+    const pv = h.currentValue || h.shares * h.currentPrice;
+    const w = totalVal > 0 ? pv / totalVal : 0;
+    return { ...h, positionValue: pv, weight: w, pnlPercent: calc.pnlPercent(h.currentPrice, h.buyPrice), pnlDollar: h.pnlFromExcel || calc.pnlDollar(h.currentPrice, h.buyPrice, h.shares) };
+  });
+  return { totalVal, active, exited, computed, totalRealizedPnl, totalCostBasis };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -263,28 +288,28 @@ function computeHoldings(holdings) {
 // ═══════════════════════════════════════════════════════════════════
 
 function OverviewPage({ holdings, settings, weeklyHistory }) {
-  const c = computeHoldings(holdings);
-  const portfolioVal = c.reduce((s, h) => s + h.value, 0);
-  const gainLoss = c.reduce((s, h) => s + (h.currentPrice - h.buyPrice) * h.shares, 0);
+  const { computed, totalVal, active: exitedCount, exited: exitedArray } = computeHoldings(holdings);
+  const portfolioVal = totalVal;
+  const gainLoss = computed.reduce((s, h) => s + (h.currentPrice - h.buyPrice) * h.shares, 0);
   const gainLossPct = portfolioVal > 0 ? gainLoss / (portfolioVal - gainLoss) : 0;
-  const avgBeta = c.filter(h => h.theme !== "Benchmark").reduce((s, h) => s + (h.weight || 0) * (h.marketBeta || 0), 0);
-  const spyCount = c.filter(h => h.ticker === "SPY").length;
-  const benchmarkPct = c.filter(h => h.theme === "Benchmark").reduce((s, h) => s + h.weight, 0);
-  const topGain = [...c].sort((a, b) => (b.currentPrice - b.buyPrice) / b.buyPrice - (a.currentPrice - a.buyPrice) / a.buyPrice)[0];
-  const activeCount = c.filter(h => h.status === "active").length;
-  const spyPrice = c.find(h => h.ticker === "SPY")?.currentPrice || 0;
+  const avgBeta = computed.filter(h => h.theme !== "Benchmark").reduce((s, h) => s + (h.weight || 0) * (h.marketBeta || 0), 0);
+  const spyCount = computed.filter(h => h.ticker === "SPY").length;
+  const benchmarkPct = computed.filter(h => h.theme === "Benchmark").reduce((s, h) => s + h.weight, 0);
+  const topGain = [...computed].sort((a, b) => (b.currentPrice - b.buyPrice) / b.buyPrice - (a.currentPrice - a.buyPrice) / a.buyPrice)[0];
+  const activeCount = computed.filter(h => h.status === "active").length;
+  const spyPrice = computed.find(h => h.ticker === "SPY")?.currentPrice || 0;
 
   const themeData = useMemo(() => {
     const themes = {};
-    c.forEach(h => { if(!themes[h.theme]) themes[h.theme] = 0; themes[h.theme] += h.weight; });
+    computed.forEach(h => { if(!themes[h.theme]) themes[h.theme] = 0; themes[h.theme] += h.weight; });
     return Object.entries(themes).map(([theme, weight]) => ({name: theme, value: Math.round(weight * 100), fill: THEME_COLORS[theme] || "#64748b" })).sort((a, b) => b.value - a.value);
-  }, [c]);
+  }, [computed]);
 
   const statusData = useMemo(() => {
-    const active = c.filter(h => h.status === "active").length;
-    const exited = c.filter(h => h.status === "exited").length;
+    const active = computed.filter(h => h.status === "active").length;
+    const exited = computed.filter(h => h.status === "exited").length;
     return [{name: "Active", value: active, fill: "#10b981"}, {name: "Exited", value: exited, fill: "#94a3b8"}];
-  }, [c]);
+  }, [computed]);
 
   const historyData = useMemo(() => {
     return (weeklyHistory || []).map(w => ({ week: w.week || "—", return: (w.return || 0) * 100 })).slice(-52);
@@ -314,8 +339,8 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
   const [filter, setF] = useState("all");
   const [editId, setEI] = useState(null);
   const [editSL, setESL] = useState({});
-  const c = computeHoldings(holdings);
-  const filtered = filter === "all" ? c : filter === "active" ? c.filter(h => h.status === "active") : c.filter(h => h.status === "exited");
+  const { computed } = computeHoldings(holdings);
+  const filtered = filter === "all" ? computed : filter === "active" ? computed.filter(h => h.status === "active") : computed.filter(h => h.status === "exited");
 
   const updateHolding = useCallback(async (id, updates) => {
     const updated = holdings.map(h => h.id === id ? {...h, ...updates} : h);
@@ -338,9 +363,9 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
 // ═══════════════════════════════════════════════════════════════════
 
 function ReturnsPage({ holdings, settings, weeklyHistory }) {
-  const c = computeHoldings(holdings);
-  const totalReturn = c.reduce((s, h) => s + (h.currentPrice - h.buyPrice) * h.shares, 0);
-  const totalInvested = c.reduce((s, h) => s + (h.buyPrice * h.shares), 0);
+  const { computed } = computeHoldings(holdings);
+  const totalReturn = computed.reduce((s, h) => s + (h.currentPrice - h.buyPrice) * h.shares, 0);
+  const totalInvested = computed.reduce((s, h) => s + (h.buyPrice * h.shares), 0);
   const portfolioReturn = totalInvested > 0 ? totalReturn / totalInvested : 0;
 
   const historyData = useMemo(() => {
@@ -370,8 +395,8 @@ function ReturnsPage({ holdings, settings, weeklyHistory }) {
 // ═══════════════════════════════════════════════════════════════════
 
 function RiskPage({ holdings, settings }) {
-  const c = computeHoldings(holdings);
-  const portfolioBeta = c.reduce((s, h) => s + (h.weight || 0) * (h.marketBeta || 0), 0);
+  const { computed } = computeHoldings(holdings);
+  const portfolioBeta = computed.reduce((s, h) => s + (h.weight || 0) * (h.marketBeta || 0), 0);
   const portfolioVol = settings.portfolioVol || 0.168;
   const systematicVol = calc.systematicVol(portfolioBeta, settings.benchmarkVol || 0.122);
   const idiovol = calc.idiosyncraticVol(portfolioVol, systematicVol);
@@ -385,7 +410,7 @@ function RiskPage({ holdings, settings }) {
   const betaStatus = betaDev <= settings.limits.betaDeviation ? "OK" : betaDev > settings.limits.betaDeviation * 1.2 ? "BREACH" : "WARNING";
   const trackStatus = trackingErr <= settings.limits.trackingError ? "OK" : trackingErr > settings.limits.trackingError * 1.2 ? "BREACH" : "WARNING";
   const varStatus = dailyVar95 <= settings.limits.dailyVaR95 ? "OK" : dailyVar95 > settings.limits.dailyVaR95 * 1.2 ? "BREACH" : "WARNING";
-  const maxWeight = c.reduce((m, h) => Math.max(m, h.weight || 0), 0);
+  const maxWeight = computed.reduce((m, h) => Math.max(m, h.weight || 0), 0);
   const concStatus = maxWeight <= settings.limits.maxStockWeight ? "OK" : maxWeight > settings.limits.maxStockWeight * 1.2 ? "BREACH" : "WARNING";
 
   const risks = [
@@ -407,7 +432,23 @@ function RiskPage({ holdings, settings }) {
       <StatCard label="Tracking Error" value={fmt.pct(trackingErr)} color="text-slate-700" icon={BarChart3}/>
       <StatCard label="Max Weight" value={fmt.pct(maxWeight)} color={maxWeight<0.08?"text-emerald-600":"text-red-600"} icon={Briefcase}/>
     </div>
-    <Card className="p-6"><h3 className="font-bold text-slate-800 mb-4">Risk Summary</h3><div className="space-y-3">{risks.map((r, i) => <div key={i} className="flex items-center justify-between p-3 rounded-lg bg-slate-50"><div className="flex-1"><p className="text-sm font-semibold text-slate-800">{r.label}</p><p className="text-xs text-slate-500">{r.value} {r.limit !== "—" ? `/ ${r.limit}` : ""}</p></div><Badge status={r.status}/></div>)}</Card>
+    <Card className="p-6">
+      <h3 className="font-bold text-slate-800 mb-4">Risk Summary</h3>
+      <div className="space-y-3">
+        {risks.map((r, i) => {
+          const limitStr = r.limit !== "—" ? `/ ${r.limit}` : "";
+          return (
+            <div key={i} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-slate-800">{r.label}</p>
+                <p className="text-xs text-slate-500">{r.value} {limitStr}</p>
+              </div>
+              <Badge status={r.status}/>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   </div>;
 }
 
@@ -534,30 +575,177 @@ function StopLossPage({ holdings, settings }) {
 // TEAM REPORT — save, upload, google doc
 // ═══════════════════════════════════════════════════════════════════
 function TeamReportPage({ holdings, settings, report, setReport, reportMeta, setReportMeta }) {
-  const [saving, setSV] = useState(false);
-  const c = computeHoldings(holdings);
-  const portfolioVal = c.reduce((s, h) => s + h.value, 0);
-  const gainLoss = c.reduce((s, h) => s + (h.currentPrice - h.buyPrice) * h.shares, 0);
+  const {totalVal,computed,totalRealizedPnl}=computeHoldings(holdings);const pb=calc.portfolioBeta(computed);
+  const [ss,setSS]=useState(null);const [uf,setUF]=useState(null);const [gUrl,setGUrl]=useState(reportMeta?.docUrl||"");const [sUrl,setSUrl]=useState(reportMeta?.docUrl||"");const [showDoc,setSD]=useState(!!reportMeta?.docUrl);const [docEdit,setDE]=useState(!reportMeta?.docUrl);const [upEdit,setUE]=useState(!reportMeta?.uploadedFileName);const fr=useRef(null);
+
+  const save=async()=>{setSS("saving");await setReport(report);await setReportMeta({...reportMeta,docUrl:sUrl||gUrl,uploadedFileName:uf?.name||reportMeta?.uploadedFileName});setTimeout(()=>setSS("saved"),300);setTimeout(()=>setSS(null),2500);};
+  const onFile=e=>{const f=e.target.files?.[0];if(!f)return;setUF({name:f.name,url:URL.createObjectURL(f),type:f.type,size:(f.size/1024).toFixed(1)+" KB"});setUE(false);setReportMeta({...reportMeta,uploadedFileName:f.name});};
+  const saveDoc=()=>{if(!gUrl)return;let u=gUrl;if(u.includes("/edit"))u=u.replace("/edit","/preview");else if(!u.includes("/preview")&&u.includes("docs.google.com"))u=u.replace(/\/?(\?.*)?$/,"/preview");setSUrl(u);setSD(true);setDE(false);setReportMeta({...reportMeta,docUrl:u});};
 
   return <div className="space-y-6">
-    <SectionHeader title="Team Report" subtitle="Collaborative weekly debrief"/>
-    <div className="grid md:grid-cols-3 gap-3"><StatCard label="Portfolio Value" value={fmt.usd(portfolioVal)} icon={DollarSign}/><StatCard label="Gain/Loss" value={fmt.usd(gainLoss)} color={gainLoss>=0?"text-emerald-600":"text-red-600"} icon={TrendingUp}/><StatCard label="Last Updated" value={reportMeta.lastUpdated?fmt.date(reportMeta.lastUpdated):"—"} icon={FileText}/></div>
-    <Card className="p-6"><textarea value={report} onChange={e=>setReport(e.target.value)} placeholder="Paste your team's weekly debrief here..." className="w-full h-64 p-3 border rounded-lg text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"/><div className="flex gap-2 mt-4"><button onClick={async()=>{setSV(true);try{await setReportMeta({...reportMeta,lastUpdated:new Date().toISOString()});alert("Report saved!");}catch(e){alert("Save failed");}setSV(false);}} disabled={saving} className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-white rounded-lg text-sm font-medium hover:bg-slate-900 disabled:opacity-50"><Save size={14}/>Save Report</button><button onClick={()=>console.log("Download...")} className="px-4 py-2 border rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"><Download size={14}/></button><button onClick={()=>console.log("Print...")} className="px-4 py-2 border rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"><Printer size={14}/></button></div></Card>
+    <SectionHeader title="Team Report">
+      <div className="flex items-center gap-2">
+        <button onClick={save} className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium ${ss==="saved"?"bg-emerald-600 text-white":"bg-slate-800 text-white hover:bg-slate-700"}`}>
+          {ss==="saving"?<Loader2 size={16} className="animate-spin"/>:ss==="saved"?<Check size={16}/>:<Save size={16}/>} {ss==="saved"?"Saved!":"Save All"}
+        </button>
+        <button onClick={()=>window.print()} className="flex items-center gap-2 px-4 py-2 border text-slate-700 rounded-md hover:bg-slate-50 text-sm"><Printer size={16}/> Print</button>
+      </div>
+    </SectionHeader>
+    <Card className="p-6">
+      <div className="border-b-2 border-slate-800 pb-4 mb-4 text-center">
+        <h1 className="text-xl font-bold text-slate-800">NYU Stern MIF</h1>
+        <p className="text-sm text-slate-500 mt-1">{new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}</p>
+      </div>
+      <div className="grid grid-cols-4 gap-4 text-center">
+        {[{l:"Value",v:fmt.usd(totalVal)},{l:"β",v:fmt.num(pb)},{l:"Active",v:computed.length},{l:"Realized PnL",v:fmt.usd(totalRealizedPnl)}].map(s=>(
+          <div key={s.l} className="bg-slate-50 rounded-lg p-3">
+            <p className="text-xs text-slate-500">{s.l}</p>
+            <p className="text-lg font-bold text-slate-800">{s.v}</p>
+          </div>
+        ))}
+      </div>
+    </Card>
+    <Card className="p-5">
+      <h3 className="text-sm font-semibold text-slate-700 mb-3">Upload Document</h3>
+      {upEdit ? (
+        <div>
+          <input ref={fr} type="file" accept=".pdf,.doc,.docx" onChange={onFile} className="hidden"/>
+          <button onClick={()=>fr.current?.click()} className="flex items-center gap-2 px-4 py-3 border-2 border-dashed rounded-lg text-sm text-slate-600 hover:border-blue-400 w-full justify-center">
+            <Upload size={18}/> Upload PDF / DOCX
+          </button>
+          {uf && (
+            <div className="mt-3 flex items-center gap-2">
+              <div className="flex-1 p-2.5 bg-slate-50 rounded-lg flex items-center gap-2">
+                <FileText size={16} className="text-blue-500"/>
+                <span className="text-sm font-medium truncate">{uf.name}</span>
+              </div>
+              <button onClick={()=>setUE(false)} className="px-3 py-2 bg-emerald-600 text-white text-xs rounded-md"><Save size={12}/></button>
+            </div>
+          )}
+        </div>
+      ) : uf ? (
+        <div className="flex items-center gap-2 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+          <CheckCircle size={16} className="text-emerald-600"/>
+          <span className="text-sm font-medium">{uf.name}</span>
+          <button onClick={()=>setUE(true)} className="ml-auto text-xs text-slate-500 border rounded px-2 py-1">Change</button>
+        </div>
+      ) : reportMeta?.uploadedFileName ? (
+        <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+          <FileText size={16} className="text-amber-500"/>
+          <span className="text-sm">{reportMeta.uploadedFileName}</span>
+          <button onClick={()=>setUE(true)} className="ml-auto text-xs border rounded px-2 py-1">Re-upload</button>
+        </div>
+      ) : null}
+    </Card>
+    <Card className="p-5">
+      <h3 className="text-sm font-semibold text-slate-700 mb-3">Google Doc</h3>
+      {docEdit || !sUrl ? (
+        <div className="flex gap-2">
+          <input type="text" value={gUrl} onChange={e=>setGUrl(e.target.value)} placeholder="https://docs.google.com/document/d/..." className="flex-1 px-3 py-2.5 text-sm border rounded-lg"/>
+          <button onClick={saveDoc} disabled={!gUrl} className="px-4 py-2.5 bg-emerald-600 text-white text-sm rounded-lg disabled:opacity-50"><Save size={14}/></button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+          <CheckCircle size={16} className="text-blue-600"/>
+          <a href={gUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-700 truncate flex-1">{gUrl}</a>
+          <button onClick={()=>setDE(true)} className="text-xs border rounded px-2 py-1">Edit</button>
+        </div>
+      )}
+    </Card>
+    {(uf || showDoc) && (
+      <Card className="p-4">
+        <div className="border rounded-lg overflow-hidden bg-slate-50" style={{height:"600px"}}>
+          {uf?.type==="application/pdf" ? (
+            <iframe src={uf.url} className="w-full h-full"/>
+          ) : showDoc && !uf ? (
+            <iframe src={sUrl} className="w-full h-full"/>
+          ) : (
+            <div className="flex items-center justify-center h-full">
+              <p className="text-slate-500">{uf ? "Preview unavailable for this format" : "Loading..."}</p>
+            </div>
+          )}
+        </div>
+      </Card>
+    )}
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-700">Report Draft</h3>
+        <button onClick={save} className="flex items-center gap-1 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-md"><Save size={12}/> Save</button>
+      </div>
+      <textarea value={report} onChange={e=>setReport(e.target.value)} rows={18} className="w-full p-4 text-sm border rounded-lg font-mono" placeholder="Write report..."/>
+    </Card>
   </div>;
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SETTINGS PAGE
+// SETTINGS — with save
 // ═══════════════════════════════════════════════════════════════════
 function SettingsPage({ settings, setSettings, holdings, setHoldings, weeklyHistory, setWeeklyHistory, group }) {
-  const [section, setSec] = useState("risk");
-  const editSetting = useCallback((key, val) => { setSettings({...settings, [key]: val}); try { fetch("/api/settings", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({...settings, [key]: val, group}) }); } catch {} }, [settings, setSettings, group]);
+  const [showM,setSM]=useState(false);const [ss,setSS]=useState(null);
+  const save=async()=>{setSS("saving");await setSettings(settings);setTimeout(()=>setSS("saved"),300);setTimeout(()=>setSS(null),2500);};
+  const expJ=()=>{
+    const d=JSON.stringify({holdings,settings,weeklyHistory},null,2);
+    const b=new Blob([d],{type:"application/json"});
+    const u=URL.createObjectURL(b);
+    const a=document.createElement("a");a.href=u;a.download=`stern_${group}_data.json`;a.click();
+  };
+  const impJ=()=>{
+    const inp=document.createElement("input");inp.type="file";inp.accept=".json";
+    inp.onchange=e=>{
+      const f=e.target.files[0];if(!f)return;
+      const r=new FileReader();
+      r.onload=ev=>{
+        try{const p=JSON.parse(ev.target.result);if(p.holdings)setHoldings(p.holdings);if(p.settings)setSettings(p.settings);if(p.weeklyHistory)setWeeklyHistory(p.weeklyHistory);}
+        catch{alert("Invalid JSON");}
+      };
+      r.readAsText(f);
+    };
+    inp.click();
+  };
+  const reset=async()=>{
+    if(!confirm(`Reset ${group} database?`))return;
+    try{await fetch("/api/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({group})});window.location.reload();}
+    catch(e){alert("Reset failed: "+e.message);}
+  };
 
   return <div className="space-y-6">
-    <SectionHeader title="Settings" subtitle="Risk limits & strategy config"/>
-    <div className="flex items-center gap-2 flex-wrap">{["risk", "data"].map(s=><TabButton key={s} active={section===s} onClick={()=>setSec(s)}>{s==="risk"?"Risk Limits":"Data & Export"}</TabButton>)}</div>
-    {section==="risk" && <div className="space-y-3"><Card className="p-4"><div className="flex items-center justify-between"><div><p className="font-semibold text-slate-800">Daily VaR (95%)</p><p className="text-xs text-slate-500">Max acceptable daily loss</p></div><input type="number" step="0.001" value={settings.limits?.dailyVaR95||0.025} onChange={e=>editSetting('limits',{...settings.limits,dailyVaR95:parseFloat(e.target.value)})} className="w-20 px-2 py-1 border rounded text-sm"/></div></Card><Card className="p-4"><div className="flex items-center justify-between"><div><p className="font-semibold text-slate-800">Tracking Error</p><p className="text-xs text-slate-500">Max deviation from benchmark</p></div><input type="number" step="0.01" value={settings.limits?.trackingError||0.06} onChange={e=>editSetting('limits',{...settings.limits,trackingError:parseFloat(e.target.value)})} className="w-20 px-2 py-1 border rounded text-sm"/></div></Card></div>}
-    {section==="data" && <Card className="p-6"><h3 className="font-bold text-slate-800 mb-4">Export Data</h3><div className="flex gap-2"><button className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-100"><Download size={14}/>CSV</button><button className="flex items-center gap-2 px-4 py-2 bg-green-50 text-green-600 rounded-lg text-sm font-medium hover:bg-green-100"><Download size={14}/>JSON</button></div></Card>}
+    <SectionHeader title="Settings" subtitle={`${group} group`}>
+      <button onClick={save} className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium ${ss==="saved"?"bg-emerald-600 text-white":"bg-slate-800 text-white hover:bg-slate-700"}`}>
+        {ss==="saving"?<Loader2 size={16} className="animate-spin"/>:ss==="saved"?<Check size={16}/>:<Save size={16}/>} {ss==="saved"?"Saved!":"Save Settings"}
+      </button>
+    </SectionHeader>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <Card className="p-5">
+        <h3 className="text-sm font-semibold text-slate-700 mb-4">Inputs</h3>
+        <div className="space-y-3">
+          {[{l:"SPY Weekly Return",k:"spyWeeklyReturn"},{l:"Benchmark Vol",k:"benchmarkVol"},{l:"Portfolio Vol",k:"portfolioVol"},{l:"Risk-Free Rate",k:"riskFreeRate"},{l:"SL Warning Buffer",k:"stopLossWarningBuffer"}].map(p=>(
+            <div key={p.k} className="flex items-center gap-3">
+              <label className="text-xs text-slate-500 font-medium w-40">{p.l}</label>
+              <input type="number" value={settings[p.k]} onChange={e=>setSettings({...settings,[p.k]:parseFloat(e.target.value)||0})} step="0.001" className="flex-1 px-2 py-1.5 text-sm border rounded-md"/>
+            </div>
+          ))}
+        </div>
+      </Card>
+      <Card className="p-5">
+        <h3 className="text-sm font-semibold text-slate-700 mb-4">Limits</h3>
+        <div className="space-y-3">
+          {Object.entries(settings.limits||{}).map(([k,v])=>(
+            <div key={k} className="flex items-center gap-3">
+              <label className="text-xs text-slate-500 font-medium w-40 capitalize">{k.replace(/([A-Z])/g," $1")}</label>
+              <input type="number" value={v} onChange={e=>setSettings({...settings,limits:{...settings.limits,[k]:parseFloat(e.target.value)||0}})} step="0.01" className="flex-1 px-2 py-1.5 text-sm border rounded-md"/>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+    <Card className="p-5">
+      <h3 className="text-sm font-semibold text-slate-700 mb-4">Data</h3>
+      <div className="flex flex-wrap gap-3">
+        <button onClick={expJ} className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-white rounded-md text-sm"><Download size={14}/> Export JSON</button>
+        <button onClick={impJ} className="flex items-center gap-2 px-4 py-2 border rounded-md text-sm"><Upload size={14}/> Import JSON</button>
+        <button onClick={reset} className="flex items-center gap-2 px-4 py-2 border border-red-200 text-red-600 rounded-md text-sm"><RefreshCw size={14}/> Reset {group}</button>
+      </div>
+    </Card>
   </div>;
 }
 
