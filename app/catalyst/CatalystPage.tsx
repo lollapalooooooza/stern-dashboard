@@ -9,7 +9,6 @@ import RangeAnalysisPanel from './components/RangeAnalysisPanel';
 import RangeNewsPanel from './components/RangeNewsPanel';
 import SimilarDaysPanel from './components/SimilarDaysPanel';
 import PredictionPanel from './components/PredictionPanel';
-import AiChatPanel from './components/AiChatPanel';
 import ToastContainer from './components/Toast';
 import './catalyst.css';
 
@@ -67,7 +66,7 @@ export default function CatalystPage({ holdings }: Props) {
   const [tickerLoading, setTickerLoading] = useState(false);
   const [tickerLoadingMessage, setTickerLoadingMessage] = useState('');
   const [tickerSwitching, setTickerSwitching] = useState(false);
-  const [predView, setPredView] = useState<'prediction' | 'ask' | 'ai-chat'>('prediction');
+  const [predView, setPredView] = useState<'prediction' | 'ask'>('prediction');
   const [customRangeQuestion, setCustomRangeQuestion] = useState('');
 
   const [watchlist, setWatchlist] = useState<string[]>(() => {
@@ -336,6 +335,13 @@ export default function CatalystPage({ holdings }: Props) {
           <div className="header-gradient-line" />
           <div className="header-content header-content-minimal">
             <div className="header-left">
+              <div className="header-brand">
+                <div className="header-brand-icon">C</div>
+                <div className="header-brand-text">
+                  <span className="header-brand-title">NYU Stern MIF</span>
+                  <span className="header-brand-sub">Catalyst · Research</span>
+                </div>
+              </div>
               <StockSelector
                 activeTickers={activeTickers}
                 selectedSymbol={selectedSymbol}
@@ -377,9 +383,6 @@ export default function CatalystPage({ holdings }: Props) {
                 <button className={`header-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => selectedRange && setPredView('ask')} disabled={!selectedRange}>
                   Range Q&A
                 </button>
-                <button className={`header-mode-btn ${predView === 'ai-chat' ? 'active' : ''}`} onClick={() => setPredView('ai-chat' as any)}>
-                  AI Chat
-                </button>
               </div>
             </div>
           </div>
@@ -407,9 +410,7 @@ export default function CatalystPage({ holdings }: Props) {
 
           {selectedSymbol && (
             <div className="prediction-area">
-              {predView === 'ai-chat' ? (
-                <AiChatPanel symbol={selectedSymbol} />
-              ) : predView === 'ask' && selectedRange ? (
+              {predView === 'ask' && selectedRange ? (
                 rangeQuestion ? (
                   <RangeAnalysisPanel
                     key={`range-analysis-inline-${selectedSymbol}-${selectedRange.startDate}-${selectedRange.endDate}`}

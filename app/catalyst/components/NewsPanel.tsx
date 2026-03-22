@@ -78,12 +78,32 @@ export default function NewsPanel({ symbol, hoveredDate, onFindSimilar, highligh
       setLoading(true);
       catalystApi
         .get(`news/${symbol}?date=${hoveredDate}`)
-        .then((res) => {
-          cacheRef.current.set(cacheKey, res.data);
-          setNews(sortBySentiment(res.data));
+        .then(async (res) => {
+          let items = res.data || [];
+          // Fallback: if catalyst backend has no news, try Google News
+          if (items.length === 0) {
+            try {
+              const fallback = await fetch(`/api/stock-news?symbol=${symbol}`);
+              const fb = await fallback.json();
+              if (fb.news?.length > 0) items = fb.news;
+            } catch {}
+          }
+          cacheRef.current.set(cacheKey, items);
+          setNews(sortBySentiment(items));
           setDisplayDate(hoveredDate);
         })
-        .catch(() => {})
+        .catch(async () => {
+          // On catalyst backend failure, try Google News fallback
+          try {
+            const fallback = await fetch(`/api/stock-news?symbol=${symbol}`);
+            const fb = await fallback.json();
+            if (fb.news?.length > 0) {
+              cacheRef.current.set(cacheKey, fb.news);
+              setNews(sortBySentiment(fb.news));
+              setDisplayDate(hoveredDate);
+            }
+          } catch {}
+        })
         .finally(() => setLoading(false));
     }, 120);
   }, [symbol, hoveredDate]);

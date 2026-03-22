@@ -230,6 +230,40 @@
   gap: 16px;
 }
 
+.catalyst-wrapper .header-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.catalyst-wrapper .header-brand-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.catalyst-wrapper .header-brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.catalyst-wrapper .header-brand-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+.catalyst-wrapper .header-brand-sub {
+  font-size: 10px;
+  color: #64748b;
+}
+
 .catalyst-wrapper .header-left,
 .catalyst-wrapper .header-right {
   display: flex;

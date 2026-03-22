@@ -65,14 +65,37 @@ export default function NewsCategoryPanel({ symbol, activeCategory, onCategoryCh
   const [newsLoading, setNewsLoading] = useState(false);
   const newsCacheRef = useRef<Map<string, NewsItem[]>>(new Map());
 
+  const [fallbackNews, setFallbackNews] = useState<NewsItem[]>([]);
+
   useEffect(() => {
     if (!symbol) return;
     newsCacheRef.current.clear();
     setCategoryNews([]);
+    setFallbackNews([]);
     catalystApi
       .get<CategoriesResponse>(`news/${symbol}/categories`)
-      .then((res) => setCategories(res.data.categories))
-      .catch(() => setCategories({}));
+      .then(async (res) => {
+        const cats = res.data.categories;
+        const hasAny = Object.values(cats).some((c) => c.count > 0);
+        setCategories(cats);
+        // If no categories have articles, fetch Google News fallback
+        if (!hasAny) {
+          try {
+            const fb = await fetch(`/api/stock-news?symbol=${symbol}`);
+            const data = await fb.json();
+            if (data.news?.length > 0) setFallbackNews(data.news);
+          } catch {}
+        }
+      })
+      .catch(async () => {
+        setCategories({});
+        // Fallback on error too
+        try {
+          const fb = await fetch(`/api/stock-news?symbol=${symbol}`);
+          const data = await fb.json();
+          if (data.news?.length > 0) setFallbackNews(data.news);
+        } catch {}
+      });
   }, [symbol]);
 
   // Reset sentiment sub-filter when category changes
@@ -125,6 +148,39 @@ export default function NewsCategoryPanel({ symbol, activeCategory, onCategoryCh
   }, [activeCategory, symbol, categories]);
 
   const keys = Object.keys(categories).filter((k) => categories[k].count > 0);
+
+  // Show Google News fallback when catalyst backend has no data
+  if (keys.length === 0 && fallbackNews.length > 0) {
+    return (
+      <div className="news-category-wrap">
+        <div className="category-news-list">
+          <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>
+            Latest news for {symbol} (via Google News)
+          </div>
+          {fallbackNews.map((item) => (
+            <div
+              key={item.news_id}
+              className={`news-card ${item.sentiment === 'positive' ? 'card-positive' : item.sentiment === 'negative' ? 'card-negative' : 'card-neutral'}`}
+            >
+              <div className="news-card-top">
+                <span className={`sentiment-pill ${item.sentiment || 'neutral'}`}>
+                  {item.sentiment === 'positive' ? 'Bullish' : item.sentiment === 'negative' ? 'Bearish' : 'Neutral'}
+                </span>
+                <a href={item.article_url} target="_blank" rel="noreferrer" className="news-title">
+                  {item.title}
+                </a>
+              </div>
+              <div className="news-card-footer">
+                <span className="news-publisher">{item.publisher}</span>
+                <span className="news-date-badge">{item.trade_date}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   if (keys.length === 0) return null;
 
   function handleSentimentClick(filter: SentimentFilter) {
