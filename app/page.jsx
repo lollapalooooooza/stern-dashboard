@@ -58,7 +58,9 @@ const getThemeColor = (theme, i) => THEME_COLORS[theme] || CHART_COLORS[i % CHAR
 const GROUP_COLORS = { thematic:"#2563eb", opportunistic:"#7c3aed", systematic:"#059669", bond:"#d97706" };
 const GROUP_LABELS = { thematic:"Thematic", opportunistic:"Opportunistic", systematic:"Systematic", bond:"Bond" };
 
-const holdingValue = (holding) => Number(holding.currentValue) || Number(holding.shares) * Number(holding.currentPrice);
+const activePositionValue = (holding) => Number(holding.shares) * Number(holding.currentPrice);
+const activePnlDollar = (holding) => calc.pnlDollar(Number(holding.currentPrice), Number(holding.buyPrice), Number(holding.shares));
+const exitedPositionValue = (holding) => Number(holding.sellTotal) || Number(holding.currentValue) || Number(holding.shares) * Number(holding.sellPrice || holding.currentPrice);
 
 function applyPricesToHoldings(holdings, prices) {
   if (!prices || Object.keys(prices).length === 0) return holdings;
@@ -67,8 +69,8 @@ function applyPricesToHoldings(holdings, prices) {
     const nextPrice = prices[holding.ticker];
     if (nextPrice == null) return holding;
     const currentPrice = Number(nextPrice);
-    const currentValue = Number(holding.shares) * currentPrice;
-    const pnlFromExcel = calc.pnlDollar(currentPrice, Number(holding.buyPrice), Number(holding.shares));
+    const currentValue = activePositionValue({ ...holding, currentPrice });
+    const pnlFromExcel = activePnlDollar({ ...holding, currentPrice });
     return { ...holding, currentPrice, currentValue, pnlFromExcel };
   });
 }
@@ -118,7 +120,7 @@ function useDatabase(group) {
   // Auto-fetch prices on load
   useEffect(() => {
     if (!loaded || holdings.length === 0 || autoPriceGroupRef.current === group) return;
-    const activeCount = holdings.filter(h => h.status === "active" && h.ticker !== "SPY").length;
+    const activeCount = holdings.filter(h => h.status === "active").length;
     if (activeCount === 0) return;
     autoPriceGroupRef.current = group;
     (async () => {
@@ -248,14 +250,14 @@ function NewsFeed({ tickers }) {
 function computeHoldings(holdings) {
   const active = holdings.filter(h => h.status === "active");
   const exited = holdings.filter(h => h.status === "exited");
-  const totalVal = active.reduce((s, h) => s + holdingValue(h), 0);
+  const totalVal = active.reduce((s, h) => s + activePositionValue(h), 0);
   const totalRealizedPnl = exited.reduce((s, h) => s + (h.realizedPnl || h.pnlFromExcel || 0), 0);
   // Total cost basis = all active at buy price + all exited cost basis (includes SPY)
   const totalCostBasis = active.reduce((s, h) => s + h.shares * h.buyPrice, 0) + exited.reduce((s, h) => s + (h.costBasis || h.shares * h.buyPrice || 0), 0);
   const computed = active.map(h => {
-    const pv = holdingValue(h);
+    const pv = activePositionValue(h);
     const w = totalVal > 0 ? pv / totalVal : 0;
-    return { ...h, positionValue: pv, weight: w, effectiveBeta: calc.holdingBeta(h), pnlPercent: calc.pnlPercent(h.currentPrice, h.buyPrice), pnlDollar: h.pnlFromExcel || calc.pnlDollar(h.currentPrice, h.buyPrice, h.shares) };
+    return { ...h, positionValue: pv, weight: w, effectiveBeta: calc.holdingBeta(h), pnlPercent: calc.pnlPercent(h.currentPrice, h.buyPrice), pnlDollar: activePnlDollar(h) };
   });
   return { totalVal, active, exited, computed, totalRealizedPnl, totalCostBasis };
 }
@@ -266,6 +268,10 @@ function computeHoldings(holdings) {
 function OverviewPage({ holdings, settings, weeklyHistory }) {
   const { totalVal, computed, exited, totalRealizedPnl, totalCostBasis } = computeHoldings(holdings);
   const unrealizedPnl = computed.reduce((s,h) => s+h.pnlDollar, 0);
+  const activeCostBasis = computed.reduce((s,h) => s + Number(h.shares) * Number(h.buyPrice), 0);
+  const realizedCostBasis = exited.reduce((s,h) => s + (Number(h.costBasis) || Number(h.shares) * Number(h.buyPrice) || 0), 0);
+  const totalPnl = unrealizedPnl + totalRealizedPnl;
+  const totalReturnPct = totalCostBasis > 0 ? totalPnl / totalCostBasis : 0;
   const benchH = computed.find(h => h.theme==="Benchmark");
   const stocksOnly = computed.filter(h => h.theme!=="Benchmark");
   const portBeta = calc.portfolioBeta(computed);
@@ -281,16 +287,13 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
 
   // Single source of truth: cumulative return from actual account balances
   const cumReturn = weeklyHistory.reduce((s,w) => s + w.portfolioReturn, 0);
-  // Starting portfolio value = current value / (1 + cumReturn) — derived from account balances
-  const startingVal = cumReturn !== 0 ? totalVal / (1 + cumReturn) : totalVal;
-  const totalPnlFromBalance = totalVal - startingVal;
 
   return <div className="space-y-6">
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Active: ${fmt.usd(totalVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}\nStarting: ${fmt.usd(startingVal)}`}/>
-      <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(startingVal > 0 ? unrealizedPnl / startingVal : 0)} trend={unrealizedPnl >= 0 ? "up" : "down"} color={unrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open positions gain/loss\nvs starting value ${fmt.usd(startingVal)}`} /> 
-      <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(startingVal > 0 ? totalRealizedPnl / startingVal : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nvs starting value ${fmt.usd(startingVal)}`} /> 
-      <StatCard label="Total Return" value={fmt.usd(totalPnlFromBalance)} sub={fmt.pct(cumReturn)} trend={cumReturn >= 0 ? "up" : "down"} color={cumReturn >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`From account balances\nStart: ${fmt.usd(startingVal)}\nNow: ${fmt.usd(totalVal)}\nMatches cumulative chart`} />
+      <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Active non-benchmark: ${fmt.usd(totalVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}\nDerived from shares × latest price`} />
+      <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(activeCostBasis > 0 ? unrealizedPnl / activeCostBasis : 0)} trend={unrealizedPnl >= 0 ? "up" : "down"} color={unrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from holdings\nCost basis: ${fmt.usd(activeCostBasis)}\nValue: ${fmt.usd(totalVal)}`} /> 
+      <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(realizedCostBasis > 0 ? totalRealizedPnl / realizedCostBasis : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usd(realizedCostBasis)}`} /> 
+      <StatCard label="Total Return" value={fmt.usd(totalPnl)} sub={fmt.pct(totalReturnPct)} trend={totalPnl >= 0 ? "up" : "down"} color={totalPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Unrealized + realized PnL\nTotal cost basis: ${fmt.usd(totalCostBasis)}\nWeekly history cumulative: ${fmt.pct(cumReturn)}`} />
       <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × adjusted β_i), where benchmark overlap pulls holding beta toward 1.00"/>
       <StatCard label="Tracking Error" value={fmt.pct(te)} icon={Activity}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
@@ -333,14 +336,14 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
   const handleSave = async () => { setSS("saving"); await setHoldings(holdings); setTimeout(()=>setSS("saved"),300); setTimeout(()=>setSS(null),2500); };
 
   const themes = ["All",...new Set(holdings.map(h=>h.theme))];
-  const totalVal = holdings.filter(h=>h.status==="active").reduce((s,h)=>s+(h.currentValue||h.shares*h.currentPrice),0);
+  const totalVal = holdings.filter(h=>h.status==="active").reduce((s,h)=>s+activePositionValue(h),0);
   const totalRealized = holdings.filter(h=>h.status==="exited").reduce((s,h)=>s+(h.realizedPnl||h.pnlFromExcel||0),0);
 
   const computed = useMemo(()=>{
     let f = holdings.map(h=>{
-      if (h.status==="exited") return {...h, positionValue:h.sellTotal||0, weight:0, pnlPercent:h.realizedPnlPct||(h.costBasis>0?(h.realizedPnl||0)/h.costBasis:0), pnlDollar:h.realizedPnl||h.pnlFromExcel||0};
-      const pv=h.currentValue||h.shares*h.currentPrice; const w=h.status==="active"?pv/totalVal:0;
-      return {...h,positionValue:pv,weight:w,pnlPercent:calc.pnlPercent(h.currentPrice,h.buyPrice),pnlDollar:h.pnlFromExcel||calc.pnlDollar(h.currentPrice,h.buyPrice,h.shares)};
+      if (h.status==="exited") return {...h, positionValue:exitedPositionValue(h), weight:0, pnlPercent:h.realizedPnlPct||(h.costBasis>0?(h.realizedPnl||0)/h.costBasis:0), pnlDollar:h.realizedPnl||h.pnlFromExcel||0};
+      const pv=activePositionValue(h); const w=h.status==="active"?pv/totalVal:0;
+      return {...h,positionValue:pv,weight:w,pnlPercent:calc.pnlPercent(h.currentPrice,h.buyPrice),pnlDollar:activePnlDollar(h)};
     });
     if (statusFilter!=="all") f=f.filter(h=>h.status===statusFilter);
     if (themeFilter!=="All") f=f.filter(h=>h.theme===themeFilter);
@@ -424,12 +427,12 @@ function ReturnsPage({ holdings, settings, weeklyHistory }) {
 
   // Basket attribution from actual holding PnL (includes impact of exits)
   const totalDeployed = computed.reduce((s,h)=>s+h.positionValue,0) + exited.reduce((s,h)=>s+(h.costBasis||0),0);
-  const totalCurrentVal = computed.reduce((s,h)=>s+h.positionValue,0) + exited.reduce((s,h)=>s+(h.sellTotal||h.currentValue||0),0);
+  const totalCurrentVal = computed.reduce((s,h)=>s+h.positionValue,0) + exited.reduce((s,h)=>s+exitedPositionValue(h),0);
   const totalPnl = totalCurrentVal - totalDeployed;
   const totalRetPct = totalDeployed > 0 ? totalPnl / totalDeployed : 0;
 
   // Basket: include both active and exited positions per theme
-  const allHoldings = [...computed, ...exited.map(h=>({...h, positionValue:h.sellTotal||h.currentValue||0, weight:0, pnlDollar:h.realizedPnl||h.pnlFromExcel||0, pnlPercent:h.realizedPnlPct||(h.costBasis>0?(h.realizedPnl||0)/h.costBasis:0), marketBeta:h.marketBeta||1}))];
+  const allHoldings = [...computed, ...exited.map(h=>({...h, positionValue:exitedPositionValue(h), weight:0, pnlDollar:h.realizedPnl||h.pnlFromExcel||0, pnlPercent:h.realizedPnlPct||(h.costBasis>0?(h.realizedPnl||0)/h.costBasis:0), marketBeta:h.marketBeta||1}))];
   const allThemes = [...new Set(allHoldings.map(h=>h.theme))];
   const basket = allThemes.map(t=>{
     const th = allHoldings.filter(h=>h.theme===t);

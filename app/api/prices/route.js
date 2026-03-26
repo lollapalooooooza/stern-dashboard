@@ -60,7 +60,7 @@ export async function POST(request) {
     const body = await request.json().catch(() => ({}));
     const group = body.group || "thematic";
     const holdings = await getAllHoldings(group);
-    const tickers = [...new Set(holdings.filter(h => h.status === "active" && h.ticker !== "SPY").map(h => h.ticker))];
+    const tickers = [...new Set(holdings.filter(h => h.status === "active").map(h => h.ticker))];
     if (!tickers.length) return Response.json({ prices: {}, count: 0, ms: Date.now() - t0 });
 
     // Check server cache — return instantly if fresh
