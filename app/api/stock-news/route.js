@@ -1,4 +1,4 @@
-// app/api/stock-news/route.js — Single-ticker Google News fallback for catalyst
+// app/api/stock-news/route.js — Fast single-ticker Google News + Yahoo Finance fallback
 // Used when the catalyst backend has no news for a symbol
 
 const TICKER_NAMES = {
@@ -21,9 +21,22 @@ const TICKER_NAMES = {
   TSLA: "Tesla", RIVN: "Rivian", BABA: "Alibaba", GOOG: "Google", NVDA: "NVIDIA",
   TSM: "TSMC", QCOM: "Qualcomm", ARM: "ARM Holdings", MU: "Micron", AVGO: "Broadcom",
   DIS: "Disney", MSFT: "Microsoft", AAPL: "Apple", META: "Meta Platforms",
+  DEF: "Defiance Technologies", LMAB: "Lemonade Insurance", CG: "Carlyle Group",
+  RUM: "Rumble", BRK: "Berkshire Hathaway",
 };
 
-async function fetchRSS(query, timeout = 5000) {
+// Server-side cache per symbol (2 min TTL)
+const stockNewsCache = new Map();
+const CACHE_TTL = 120_000;
+
+function classifySentiment(title) {
+  const lo = title.toLowerCase();
+  if (/surge|jump|rally|gain|beat|record|upgrade|rise|profit|strong|bullish|soar|outperform|buy|boost|grow|highest|recover/i.test(lo)) return "positive";
+  if (/drop|fall|crash|plunge|miss|cut|downgrade|sell|decline|loss|weak|bearish|tumble|sink|slump|warning|layoff|lawsuit|recall|worst|underperform/i.test(lo)) return "negative";
+  return "neutral";
+}
+
+async function fetchRSS(query, timeout = 3500) {
   try {
     const resp = await fetch(
       `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`,
@@ -34,7 +47,7 @@ async function fetchRSS(query, timeout = 5000) {
     const items = [];
     const re = /<item>([\s\S]*?)<\/item>/g;
     let m;
-    while ((m = re.exec(xml)) !== null && items.length < 12) {
+    while ((m = re.exec(xml)) !== null && items.length < 10) {
       const item = m[1];
       const gt = tag => { const r = new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?</${tag}>`); const x = item.match(r); return x ? x[1].trim().replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"') : ""; };
       const title = gt("title");
@@ -44,8 +57,6 @@ async function fetchRSS(query, timeout = 5000) {
       const linkM = item.match(/<link\s*\/?>\s*(https?:\/\/[^\s<]+)/);
       let dateStr = "";
       try { dateStr = new Date(pubDate).toISOString().split("T")[0]; } catch {}
-      const lo = title.toLowerCase();
-      const sent = /surge|jump|rally|gain|beat|record|upgrade|rise|profit|strong|bullish|soar/i.test(lo) ? "positive" : /drop|fall|crash|plunge|miss|cut|downgrade|sell|decline|loss|weak|bearish|tumble|sink/i.test(lo) ? "negative" : "neutral";
       items.push({
         news_id: `gn-${items.length}-${Date.now()}`,
         trade_date: dateStr,
@@ -57,7 +68,49 @@ async function fetchRSS(query, timeout = 5000) {
         image_url: null,
         relevance: null,
         key_discussion: null,
-        sentiment: sent,
+        sentiment: classifySentiment(title),
+        reason_growth: null,
+        reason_decrease: null,
+        ret_t0: null,
+        ret_t1: null,
+      });
+    }
+    return items;
+  } catch { return []; }
+}
+
+async function fetchYahooRSS(ticker, timeout = 3000) {
+  try {
+    const resp = await fetch(
+      `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${ticker}&region=US&lang=en-US`,
+      { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(timeout) }
+    );
+    if (!resp.ok) return [];
+    const xml = await resp.text();
+    const items = [];
+    const re = /<item>([\s\S]*?)<\/item>/g;
+    let m;
+    while ((m = re.exec(xml)) !== null && items.length < 8) {
+      const item = m[1];
+      const gt = tag => { const r = new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?</${tag}>`); const x = item.match(r); return x ? x[1].trim().replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"') : ""; };
+      const title = gt("title");
+      if (!title) continue;
+      const pubDate = gt("pubDate");
+      const linkM = item.match(/<link\s*\/?>\s*(https?:\/\/[^\s<]+)/);
+      let dateStr = "";
+      try { dateStr = new Date(pubDate).toISOString().split("T")[0]; } catch {}
+      items.push({
+        news_id: `yf-${items.length}-${Date.now()}`,
+        trade_date: dateStr,
+        published_utc: pubDate,
+        title: title.substring(0, 300),
+        description: "",
+        publisher: "Yahoo Finance",
+        article_url: linkM ? linkM[1] : "",
+        image_url: null,
+        relevance: null,
+        key_discussion: null,
+        sentiment: classifySentiment(title),
         reason_growth: null,
         reason_decrease: null,
         ret_t0: null,
@@ -73,13 +126,20 @@ export async function GET(request) {
   const symbol = (searchParams.get("symbol") || "").toUpperCase();
   if (!symbol) return Response.json({ news: [] });
 
+  // Check cache
+  const cached = stockNewsCache.get(symbol);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) {
+    return Response.json({ news: cached.news, cached: true });
+  }
+
   const companyName = TICKER_NAMES[symbol] || symbol;
 
-  // Run multiple query strategies in parallel
+  // Run all query strategies in parallel (Google + Yahoo)
   const results = await Promise.allSettled([
     fetchRSS(`"${companyName}" stock`),
     fetchRSS(`${symbol} stock market`),
     fetchRSS(`${companyName} earnings revenue`),
+    fetchYahooRSS(symbol),
   ]);
 
   const allNews = [];
@@ -87,7 +147,7 @@ export async function GET(request) {
   for (const r of results) {
     if (r.status !== "fulfilled") continue;
     for (const item of r.value) {
-      const key = item.title.substring(0, 50).toLowerCase();
+      const key = item.title.substring(0, 50).toLowerCase().replace(/[^a-z0-9]/g, '');
       if (!seen.has(key)) {
         seen.add(key);
         allNews.push(item);
@@ -95,5 +155,10 @@ export async function GET(request) {
     }
   }
 
-  return Response.json({ news: allNews.slice(0, 15) });
+  const finalNews = allNews.slice(0, 20);
+
+  // Cache
+  stockNewsCache.set(symbol, { news: finalNews, ts: Date.now() });
+
+  return Response.json({ news: finalNews });
 }

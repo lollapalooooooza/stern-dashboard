@@ -2,6 +2,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import dynamic from 'next/dynamic';
 const CatalystPage = dynamic(() => import('./catalyst/CatalystPage'), { ssr: false });
+const CommentPanel = dynamic(() => import('./components/CommentPanel'), { ssr: false });
 import {
   PieChart, Pie, Cell, BarChart, Bar, LineChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area
@@ -609,6 +610,7 @@ export default function App() {
           {page==="catalyst" && <CatalystPage holdings={db.holdings}/>}
         </main>
       </div>
+      {page!=="catalyst" && <CommentPanel page={page} group={group}/>}
     </div>
   );
 }

@@ -84,7 +84,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     if (!symbol) return;
     const reqId = ++requestSeqRef.current;
 
-    // Check cache first
+    // Check cache first — instant render
     const cached = chartCache.get(symbol);
     if (cached) {
       setRawOhlc(cached.ohlc);
@@ -101,15 +101,30 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
     setViewCount(null);
     setViewStart(0);
 
-    Promise.all([
-      catalystApi.get<OHLCRow[]>(`stocks/${symbol}/ohlc`),
-      catalystApi.get<Particle[]>(`news/${symbol}/particles`),
-    ])
+    // Race: show OHLC as soon as it arrives, don't wait for particles
+    const ohlcPromise = catalystApi.get<OHLCRow[]>(`stocks/${symbol}/ohlc`);
+    const particlesPromise = catalystApi.get<Particle[]>(`news/${symbol}/particles`);
+
+    // Show chart as soon as OHLC is ready (don't block on particles)
+    ohlcPromise
+      .then((ohlcRes) => {
+        if (reqId !== requestSeqRef.current) return;
+        const nextOhlc = ohlcRes.data || [];
+        if (nextOhlc.length > 0) {
+          setRawOhlc(nextOhlc);
+          setViewCount(nextOhlc.length);
+          setViewStart(0);
+          setLoading(false);
+        }
+      })
+      .catch(() => {});
+
+    // Then load particles separately
+    Promise.all([ohlcPromise, particlesPromise])
       .then(([ohlcRes, particlesRes]) => {
         if (reqId !== requestSeqRef.current) return;
         const nextOhlc = ohlcRes.data || [];
         const nextParticles = particlesRes.data || [];
-        // Cache the result
         chartCache.set(symbol, { ohlc: nextOhlc, particles: nextParticles });
         setRawOhlc(nextOhlc);
         setRawParticles(nextParticles);
@@ -119,7 +134,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
       .catch((err) => {
         if (reqId !== requestSeqRef.current) return;
         console.error('Chart error:', err);
-        // Retry once after 2 seconds
+        // Retry once after 1.5 seconds
         setTimeout(() => {
           if (reqId !== requestSeqRef.current) return;
           Promise.all([
@@ -135,7 +150,7 @@ export default function CandlestickChart({ symbol, lockedNewsId, highlightedArti
             setViewCount(nextOhlc.length || null);
             setViewStart(0);
           }).catch(() => {});
-        }, 2000);
+        }, 1500);
       })
       .finally(() => {
         if (reqId === requestSeqRef.current) setLoading(false);

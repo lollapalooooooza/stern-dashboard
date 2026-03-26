@@ -1,6 +1,5 @@
 import { createClient } from "@libsql/client";
 import crypto from "crypto";
-function uuidv4() { return crypto.randomUUID(); }
 
 let _client = null;
 function getClient() {
@@ -13,186 +12,128 @@ function getClient() {
   return _client;
 }
 
-const _inited = {};
+let _inited = false;
 async function init() {
-  if (_inited["comments"]) return;
+  if (_inited) return;
   const db = getClient();
-  const tableName = "catalyst_comments";
-
   await db.execute(
-    `CREATE TABLE IF NOT EXISTS ${tableName} (
+    `CREATE TABLE IF NOT EXISTS comments (
       id TEXT PRIMARY KEY,
-      author TEXT NOT NULL DEFAULT 'Anonymous',
+      page TEXT NOT NULL DEFAULT 'overview',
+      grp TEXT NOT NULL DEFAULT 'thematic',
+      username TEXT NOT NULL DEFAULT 'Anonymous',
       content TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      status TEXT DEFAULT 'active'
+      updated_at TEXT NOT NULL
     )`
   );
-
-  _inited["comments"] = true;
+  // Migrate old catalyst_comments if they exist
+  try {
+    const old = await db.execute(`SELECT name FROM sqlite_master WHERE type='table' AND name='catalyst_comments'`);
+    if (old.rows.length > 0) {
+      await db.execute(`INSERT OR IGNORE INTO comments (id, page, grp, username, content, created_at, updated_at)
+        SELECT id, 'catalyst', 'thematic', author, content, created_at, updated_at
+        FROM catalyst_comments WHERE status = 'active'`);
+    }
+  } catch {}
+  _inited = true;
 }
 
+// GET — fetch comments for a specific page + group
 export async function GET(request) {
   try {
     await init();
+    const { searchParams } = new URL(request.url);
+    const page = searchParams.get("page") || "overview";
+    const group = searchParams.get("group") || "thematic";
+
     const db = getClient();
-    const tableName = "catalyst_comments";
-
-    const result = await db.execute(
-      `SELECT id, author, content, created_at, updated_at FROM ${tableName}
-       WHERE status = 'active'
-       ORDER BY created_at DESC`
-    );
-
-    return Response.json({
-      success: true,
-      comments: result.rows || []
+    const result = await db.execute({
+      sql: `SELECT id, page, grp, username, content, created_at, updated_at
+            FROM comments WHERE page = ? AND grp = ?
+            ORDER BY created_at DESC`,
+      args: [page, group],
     });
+
+    return Response.json({ success: true, comments: result.rows || [] });
   } catch (e) {
-    return Response.json(
-      { success: false, error: e.message },
-      { status: 500 }
-    );
+    return Response.json({ success: false, error: e.message }, { status: 500 });
   }
 }
 
+// POST — create a new comment
 export async function POST(request) {
   try {
     await init();
     const db = getClient();
-    const tableName = "catalyst_comments";
     const body = await request.json();
-
-    const { author = "Anonymous", content } = body;
+    const { page = "overview", group = "thematic", username = "Anonymous", content } = body;
 
     if (!content || content.trim() === "") {
-      return Response.json(
-        { success: false, error: "Content is required" },
-        { status: 400 }
-      );
+      return Response.json({ success: false, error: "Content is required" }, { status: 400 });
     }
 
-    const id = uuidv4();
+    const id = crypto.randomUUID();
     const now = new Date().toISOString();
+    const trimmedUser = (username || "Anonymous").trim() || "Anonymous";
 
     await db.execute({
-      sql: `INSERT INTO ${tableName} (id, author, content, created_at, updated_at, status)
-            VALUES (?, ?, ?, ?, ?, 'active')`,
-      args: [id, author, content.trim(), now, now]
+      sql: `INSERT INTO comments (id, page, grp, username, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [id, page, group, trimmedUser, content.trim(), now, now],
     });
 
     return Response.json({
       success: true,
-      comment: {
-        id,
-        author,
-        content: content.trim(),
-        created_at: now,
-        updated_at: now
-      }
+      comment: { id, page, grp: group, username: trimmedUser, content: content.trim(), created_at: now, updated_at: now },
     }, { status: 201 });
   } catch (e) {
-    return Response.json(
-      { success: false, error: e.message },
-      { status: 500 }
-    );
+    return Response.json({ success: false, error: e.message }, { status: 500 });
   }
 }
 
+// PUT — update a comment
 export async function PUT(request) {
   try {
     await init();
     const db = getClient();
-    const tableName = "catalyst_comments";
-    const body = await request.json();
+    const { id, content } = await request.json();
 
-    const { id, content } = body;
-
-    if (!id) {
-      return Response.json(
-        { success: false, error: "Comment ID is required" },
-        { status: 400 }
-      );
-    }
-
-    if (!content || content.trim() === "") {
-      return Response.json(
-        { success: false, error: "Content is required" },
-        { status: 400 }
-      );
-    }
+    if (!id) return Response.json({ success: false, error: "Comment ID required" }, { status: 400 });
+    if (!content || content.trim() === "") return Response.json({ success: false, error: "Content required" }, { status: 400 });
 
     const now = new Date().toISOString();
-
     const result = await db.execute({
-      sql: `UPDATE ${tableName}
-            SET content = ?, updated_at = ?
-            WHERE id = ? AND status = 'active'`,
-      args: [content.trim(), now, id]
+      sql: `UPDATE comments SET content = ?, updated_at = ? WHERE id = ?`,
+      args: [content.trim(), now, id],
     });
 
     if (result.rowsAffected === 0) {
-      return Response.json(
-        { success: false, error: "Comment not found or already deleted" },
-        { status: 404 }
-      );
+      return Response.json({ success: false, error: "Comment not found" }, { status: 404 });
     }
 
-    return Response.json({
-      success: true,
-      comment: {
-        id,
-        content: content.trim(),
-        updated_at: now
-      }
-    });
+    return Response.json({ success: true, comment: { id, content: content.trim(), updated_at: now } });
   } catch (e) {
-    return Response.json(
-      { success: false, error: e.message },
-      { status: 500 }
-    );
+    return Response.json({ success: false, error: e.message }, { status: 500 });
   }
 }
 
+// DELETE — delete a comment
 export async function DELETE(request) {
   try {
     await init();
     const db = getClient();
-    const tableName = "catalyst_comments";
-    const body = await request.json();
+    const { id } = await request.json();
 
-    const { id } = body;
+    if (!id) return Response.json({ success: false, error: "Comment ID required" }, { status: 400 });
 
-    if (!id) {
-      return Response.json(
-        { success: false, error: "Comment ID is required" },
-        { status: 400 }
-      );
-    }
-
-    const result = await db.execute({
-      sql: `UPDATE ${tableName}
-            SET status = 'deleted', updated_at = ?
-            WHERE id = ? AND status = 'active'`,
-      args: [new Date().toISOString(), id]
-    });
+    const result = await db.execute({ sql: `DELETE FROM comments WHERE id = ?`, args: [id] });
 
     if (result.rowsAffected === 0) {
-      return Response.json(
-        { success: false, error: "Comment not found or already deleted" },
-        { status: 404 }
-      );
+      return Response.json({ success: false, error: "Comment not found" }, { status: 404 });
     }
 
-    return Response.json({
-      success: true,
-      message: "Comment deleted successfully"
-    });
+    return Response.json({ success: true });
   } catch (e) {
-    return Response.json(
-      { success: false, error: e.message },
-      { status: 500 }
-    );
+    return Response.json({ success: false, error: e.message }, { status: 500 });
   }
 }
