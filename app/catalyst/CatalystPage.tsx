@@ -9,7 +9,6 @@ import RangeAnalysisPanel from './components/RangeAnalysisPanel';
 import RangeNewsPanel from './components/RangeNewsPanel';
 import SimilarDaysPanel from './components/SimilarDaysPanel';
 import PredictionPanel from './components/PredictionPanel';
-import AiChatPanel from './components/AiChatPanel';
 import ToastContainer from './components/Toast';
 import './catalyst.css';
 
@@ -67,7 +66,7 @@ export default function CatalystPage({ holdings }: Props) {
   const [tickerLoading, setTickerLoading] = useState(false);
   const [tickerLoadingMessage, setTickerLoadingMessage] = useState('');
   const [tickerSwitching, setTickerSwitching] = useState(false);
-  const [predView, setPredView] = useState<'prediction' | 'ask' | 'chat'>('prediction');
+  const [predView, setPredView] = useState<'prediction' | 'ask'>('prediction');
   const [customRangeQuestion, setCustomRangeQuestion] = useState('');
 
   const [watchlist, setWatchlist] = useState<string[]>(() => {
@@ -381,12 +380,6 @@ export default function CatalystPage({ holdings }: Props) {
                 <button className={`header-mode-btn ${predView === 'prediction' ? 'active' : ''}`} onClick={() => setPredView('prediction')}>
                   Prediction
                 </button>
-                <button className={`header-mode-btn ${predView === 'ask' ? 'active' : ''}`} onClick={() => selectedRange && setPredView('ask')} disabled={!selectedRange}>
-                  Range Q&A
-                </button>
-                <button className={`header-mode-btn ${predView === 'chat' ? 'active' : ''}`} onClick={() => setPredView('chat')}>
-                  AI Chat
-                </button>
               </div>
             </div>
           </div>
@@ -463,12 +456,6 @@ export default function CatalystPage({ holdings }: Props) {
                     </form>
                   </div>
                 )
-              ) : predView === 'chat' ? (
-                <AiChatPanel
-                  key={`ai-chat-${selectedSymbol}`}
-                  symbol={selectedSymbol}
-                  context={hoveredOhlc ? `Current price: $${hoveredOhlc.close.toFixed(2)}, Day change: ${hoveredOhlc.change >= 0 ? '+' : ''}${hoveredOhlc.change.toFixed(2)}%` : undefined}
-                />
               ) : (
                 <PredictionPanel symbol={selectedSymbol} />
               )}
