@@ -75,6 +75,22 @@ function applyPricesToHoldings(holdings, prices) {
   });
 }
 
+function buildCumulativeReturnSeries(rows) {
+  let portfolioNav = 1;
+  let benchmarkNav = 1;
+  return rows.map((row) => {
+    portfolioNav *= 1 + (Number(row.portfolioReturn) || 0);
+    benchmarkNav *= 1 + (Number(row.benchmarkReturn) || 0);
+    return {
+      week: row.week,
+      date: row.date,
+      portfolio: portfolioNav - 1,
+      benchmark: benchmarkNav - 1,
+      excess: portfolioNav / benchmarkNav - 1,
+    };
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // DATABASE HOOK — group-aware, auto-fetches prices on load
 // ═══════════════════════════════════════════════════════════════════
@@ -280,20 +296,18 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
   const te = calc.trackingError(portBeta, settings.benchmarkVol, idioVol);
   const themes = [...new Set(computed.map(h=>h.theme))];
   const themeAlloc = themes.map((t,i) => ({name:t,value:computed.filter(h=>h.theme===t).reduce((s,h)=>s+h.weight,0),fill:getThemeColor(t,i)}));
-  const cumData = weeklyHistory.map((w,i)=>({week:w.week,portfolio:weeklyHistory.slice(0,i+1).reduce((s,x)=>s+x.portfolioReturn,0),benchmark:weeklyHistory.slice(0,i+1).reduce((s,x)=>s+x.benchmarkReturn,0)}));
+  const cumData = buildCumulativeReturnSeries(weeklyHistory);
   const pnlSorted = [...stocksOnly].sort((a,b)=>b.pnlDollar-a.pnlDollar);
   const pnlChart = [...pnlSorted.slice(0,5),...pnlSorted.slice(-5)];
   const tickers = stocksOnly.map(h=>h.ticker);
-
-  // Single source of truth: cumulative return from actual account balances
-  const cumReturn = weeklyHistory.reduce((s,w) => s + w.portfolioReturn, 0);
+  const cumReturn = cumData.length ? cumData[cumData.length - 1].portfolio : 0;
 
   return <div className="space-y-6">
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
       <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Active non-benchmark: ${fmt.usd(totalVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}\nDerived from shares × latest price`} />
       <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(activeCostBasis > 0 ? unrealizedPnl / activeCostBasis : 0)} trend={unrealizedPnl >= 0 ? "up" : "down"} color={unrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from holdings\nCost basis: ${fmt.usd(activeCostBasis)}\nValue: ${fmt.usd(totalVal)}`} /> 
       <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(realizedCostBasis > 0 ? totalRealizedPnl / realizedCostBasis : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usd(realizedCostBasis)}`} /> 
-      <StatCard label="Total Return" value={fmt.usd(totalPnl)} sub={fmt.pct(totalReturnPct)} trend={totalPnl >= 0 ? "up" : "down"} color={totalPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Unrealized + realized PnL\nTotal cost basis: ${fmt.usd(totalCostBasis)}\nWeekly history cumulative: ${fmt.pct(cumReturn)}`} />
+      <StatCard label="Total Return" value={fmt.usd(totalPnl)} sub={fmt.pct(totalReturnPct)} trend={totalPnl >= 0 ? "up" : "down"} color={totalPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Unrealized + realized PnL\nTotal cost basis: ${fmt.usd(totalCostBasis)}\nCompounded return series: ${fmt.pct(cumReturn)}`} />
       <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × adjusted β_i), where benchmark overlap pulls holding beta toward 1.00"/>
       <StatCard label="Tracking Error" value={fmt.pct(te)} icon={Activity}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
@@ -382,6 +396,20 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
 
   const activeCount = holdings.filter(h=>h.status==="active").length;
   const exitedCount = holdings.filter(h=>h.status==="exited").length;
+  const activeSummary = holdings
+    .filter((h)=>h.status==="active")
+    .map((h)=>({ ...h, positionValue: activePositionValue(h) }));
+  const benchmarkTotal = activeSummary.filter((h)=>h.theme==="Benchmark").reduce((sum,h)=>sum+h.positionValue,0);
+  const stockTotal = activeSummary.filter((h)=>h.theme!=="Benchmark").reduce((sum,h)=>sum+h.positionValue,0);
+  const portfolioTotal = stockTotal + benchmarkTotal;
+  const sectionTotals = Object.values(activeSummary.reduce((acc,h)=>{
+    if (h.theme==="Benchmark") return acc;
+    const key = h.theme;
+    if (!acc[key]) acc[key] = { theme: key, totalValue: 0, holdings: 0 };
+    acc[key].totalValue += h.positionValue;
+    acc[key].holdings += 1;
+    return acc;
+  }, {})).sort((a,b)=>b.totalValue-a.totalValue);
 
   return <div className="space-y-4">
     <SectionHeader title="Holdings" subtitle={`${activeCount} active · ${exitedCount} exited · Realized: ${fmt.usd(totalRealized)}`}>
@@ -415,64 +443,136 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
         </div></td>
       </tr>)}</tbody>
     </table></Card>
+    <Card className="p-4">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-700">Active Holdings Summary</h3>
+          <p className="text-xs text-slate-500">Portfolio, stock book, benchmark, and section totals from current active holdings.</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Portfolio Total</p>
+          <p className="mt-1 text-lg font-bold text-slate-800">{fmt.usd(portfolioTotal)}</p>
+          <p className="text-xs text-slate-500">{activeCount} active holdings</p>
+        </div>
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-blue-700">Stock Holdings</p>
+          <p className="mt-1 text-lg font-bold text-blue-900">{fmt.usd(stockTotal)}</p>
+          <p className="text-xs text-blue-700">{fmt.pct(portfolioTotal > 0 ? stockTotal / portfolioTotal : 0, 1)} of active portfolio</p>
+        </div>
+        <div className="rounded-lg border border-slate-300 bg-white p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-600">Benchmark (S&amp;P 500)</p>
+          <p className="mt-1 text-lg font-bold text-slate-900">{fmt.usd(benchmarkTotal)}</p>
+          <p className="text-xs text-slate-500">{fmt.pct(portfolioTotal > 0 ? benchmarkTotal / portfolioTotal : 0, 1)} of active portfolio</p>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <th className="px-2 py-2 text-left font-semibold uppercase tracking-wider text-slate-500">Section</th>
+              <th className="px-2 py-2 text-right font-semibold uppercase tracking-wider text-slate-500">Holdings</th>
+              <th className="px-2 py-2 text-right font-semibold uppercase tracking-wider text-slate-500">Total Value</th>
+              <th className="px-2 py-2 text-right font-semibold uppercase tracking-wider text-slate-500">% of Stocks</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sectionTotals.map((section)=>(
+              <tr key={section.theme} className="border-b border-slate-100 last:border-b-0">
+                <td className="px-2 py-2"><ThemeBadge theme={section.theme}/></td>
+                <td className="px-2 py-2 text-right text-slate-600">{section.holdings}</td>
+                <td className="px-2 py-2 text-right font-semibold text-slate-800">{fmt.usd(section.totalValue)}</td>
+                <td className="px-2 py-2 text-right text-slate-600">{fmt.pct(stockTotal > 0 ? section.totalValue / stockTotal : 0, 1)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   </div>;
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// RETURNS — attribution from actual PnL, includes realized
+// RETURNS — workbook-backed historical returns + current basket summary
 // ═══════════════════════════════════════════════════════════════════
-function ReturnsPage({ holdings, settings, weeklyHistory }) {
-  const { computed, exited, totalVal, totalRealizedPnl } = computeHoldings(holdings);
-  const themes = [...new Set(computed.map(h=>h.theme))];
-
-  // Basket attribution from actual holding PnL (includes impact of exits)
-  const totalDeployed = computed.reduce((s,h)=>s+h.positionValue,0) + exited.reduce((s,h)=>s+(h.costBasis||0),0);
-  const totalCurrentVal = computed.reduce((s,h)=>s+h.positionValue,0) + exited.reduce((s,h)=>s+exitedPositionValue(h),0);
+function ReturnsPage({ holdings, weeklyHistory }) {
+  const { computed, exited, totalVal } = computeHoldings(holdings);
+  const activeCostBasis = computed.reduce((sum, holding) => sum + Number(holding.shares) * Number(holding.buyPrice), 0);
+  const exitedCostBasis = exited.reduce((sum, holding) => sum + (Number(holding.costBasis) || Number(holding.shares) * Number(holding.buyPrice) || 0), 0);
+  const totalDeployed = activeCostBasis + exitedCostBasis;
+  const totalCurrentVal = totalVal + exited.reduce((sum, holding) => sum + exitedPositionValue(holding), 0);
   const totalPnl = totalCurrentVal - totalDeployed;
-  const totalRetPct = totalDeployed > 0 ? totalPnl / totalDeployed : 0;
 
-  // Basket: include both active and exited positions per theme
-  const allHoldings = [...computed, ...exited.map(h=>({...h, positionValue:exitedPositionValue(h), weight:0, pnlDollar:h.realizedPnl||h.pnlFromExcel||0, pnlPercent:h.realizedPnlPct||(h.costBasis>0?(h.realizedPnl||0)/h.costBasis:0), marketBeta:h.marketBeta||1}))];
-  const allThemes = [...new Set(allHoldings.map(h=>h.theme))];
-  const basket = allThemes.map(t=>{
-    const th = allHoldings.filter(h=>h.theme===t);
-    const deployed = th.reduce((s,h)=>s+(h.costBasis||h.positionValue||0),0);
-    const pnl = th.reduce((s,h)=>s+(h.pnlDollar||0),0);
-    const ret = deployed > 0 ? pnl / deployed : 0;
-    const bw = totalDeployed > 0 ? deployed / totalDeployed : 0;
-    const me = th.length > 0 ? th.reduce((s,h)=>s+(h.marketBeta||1),0)/th.length : 1;
-    const mc = me * (settings.spyWeeklyReturn || 0);
-    return { theme:t, bw, br:ret, pnl, deployed, me, mc, al:ret-mc };
-  });
+  const allHoldings = [
+    ...computed.map((holding) => ({
+      ...holding,
+      deployedValue: Number(holding.shares) * Number(holding.buyPrice),
+      currentValueForTheme: holding.positionValue,
+    })),
+    ...exited.map((holding) => ({
+      ...holding,
+      deployedValue: Number(holding.costBasis) || Number(holding.shares) * Number(holding.buyPrice) || 0,
+      currentValueForTheme: exitedPositionValue(holding),
+      pnlDollar: Number(holding.realizedPnl) || Number(holding.pnlFromExcel) || 0,
+      pnlPercent: Number(holding.realizedPnlPct) || ((Number(holding.costBasis) || 0) > 0 ? (Number(holding.realizedPnl) || 0) / Number(holding.costBasis) : 0),
+    })),
+  ];
+  const basket = [...new Set(allHoldings.map((holding) => holding.theme))]
+    .map((theme) => {
+      const themeHoldings = allHoldings.filter((holding) => holding.theme === theme);
+      const deployed = themeHoldings.reduce((sum, holding) => sum + (holding.deployedValue || 0), 0);
+      const currentValue = themeHoldings.reduce((sum, holding) => sum + (holding.currentValueForTheme || 0), 0);
+      const pnl = currentValue - deployed;
+      return {
+        theme,
+        deployed,
+        currentValue,
+        pnl,
+        returnPct: deployed > 0 ? pnl / deployed : 0,
+        shareOfBook: totalCurrentVal > 0 ? currentValue / totalCurrentVal : 0,
+      };
+    })
+    .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
 
-  // Use cumulative from weekly history (actual account balances)
-  const cumData = weeklyHistory.map((w,i)=>({week:w.week,portfolio:weeklyHistory.slice(0,i+1).reduce((s,x)=>s+x.portfolioReturn,0),benchmark:weeklyHistory.slice(0,i+1).reduce((s,x)=>s+x.benchmarkReturn,0)}));
-
-  // Summary stats from actual history
-  const cumPort = weeklyHistory.reduce((s,w)=>s+w.portfolioReturn,0);
-  const cumBench = weeklyHistory.reduce((s,w)=>s+w.benchmarkReturn,0);
-  const excessR = cumPort - cumBench;
-  const portBeta = calc.portfolioBeta(computed);
-  const mktContrib = portBeta * cumBench;
-  const alphaTotal = cumPort - mktContrib;
+  const weeklyChartData = weeklyHistory.map((row) => ({
+    ...row,
+    excessReturn: (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0),
+  }));
+  const cumulativeData = buildCumulativeReturnSeries(weeklyHistory);
+  const cumulativePortfolio = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].portfolio : 0;
+  const cumulativeBenchmark = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].benchmark : 0;
+  const excessReturn = cumulativePortfolio - cumulativeBenchmark;
+  const bestWeek = weeklyChartData.length ? [...weeklyChartData].sort((a, b) => b.portfolioReturn - a.portfolioReturn)[0] : null;
+  const worstWeek = weeklyChartData.length ? [...weeklyChartData].sort((a, b) => a.portfolioReturn - b.portfolioReturn)[0] : null;
+  const weeklyTable = [...weeklyChartData].reverse();
 
   return <div className="space-y-6">
-    <SectionHeader title="Return Attribution" subtitle="Based on actual account balances"/>
+    <SectionHeader title="Returns" subtitle="Workbook-derived weekly history plus current holdings and exits" />
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-      <StatCard label="Cumulative Return" value={fmt.pct(cumPort)} trend={cumPort>=0?"up":"down"} color={cumPort>=0?"text-emerald-700":"text-red-600"} tooltip={`From ${weeklyHistory.length} weeks of data`}/>
-      <StatCard label="Benchmark" value={fmt.pct(cumBench)}/>
-      <StatCard label="Excess Return" value={fmt.pct(excessR)} trend={excessR>=0?"up":"down"} color={excessR>=0?"text-emerald-700":"text-red-600"}/>
-      <StatCard label="Market Contrib" value={fmt.pct(mktContrib)}/>
-      <StatCard label="Alpha" value={fmt.pct(alphaTotal)} trend={alphaTotal>=0?"up":"down"} color={alphaTotal>=0?"text-emerald-700":"text-red-600"}/>
-      <StatCard label="Total PnL" value={fmt.usd(totalPnl)} trend={totalPnl>=0?"up":"down"} color={totalPnl>=0?"text-emerald-700":"text-red-600"}/>
+      <StatCard label="Cumulative Return" value={fmt.pct(cumulativePortfolio)} trend={cumulativePortfolio >= 0 ? "up" : "down"} color={cumulativePortfolio >= 0 ? "text-emerald-700" : "text-red-600"} tooltip={`Compounded from ${weeklyHistory.length} reconstructed weeks`} />
+      <StatCard label="Benchmark" value={fmt.pct(cumulativeBenchmark)} />
+      <StatCard label="Excess Return" value={fmt.pct(excessReturn)} trend={excessReturn >= 0 ? "up" : "down"} color={excessReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
+      <StatCard label="Best Week" value={bestWeek ? fmt.pct(bestWeek.portfolioReturn) : "—"} sub={bestWeek?.week || "—"} trend={bestWeek && bestWeek.portfolioReturn >= 0 ? "up" : "down"} color={bestWeek && bestWeek.portfolioReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
+      <StatCard label="Worst Week" value={worstWeek ? fmt.pct(worstWeek.portfolioReturn) : "—"} sub={worstWeek?.week || "—"} trend="down" color="text-red-600" />
+      <StatCard label="Total PnL" value={fmt.usd(totalPnl)} sub={fmt.pct(totalDeployed > 0 ? totalPnl / totalDeployed : 0)} trend={totalPnl >= 0 ? "up" : "down"} color={totalPnl >= 0 ? "text-emerald-700" : "text-red-600"} />
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Cumulative Return</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={cumData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer></Card>
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Attribution</h3><ResponsiveContainer width="100%" height={260}><BarChart data={weeklyHistory}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="marketContrib" stackId="a" fill="#1e3a5f" name="Market"/><Bar dataKey="valueContrib" stackId="a" fill="#2563eb" name="Value"/><Bar dataKey="momentumContrib" stackId="a" fill="#7c3aed" name="Momentum"/><Bar dataKey="alpha" stackId="a" fill="#059669" name="Alpha"/></BarChart></ResponsiveContainer></Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Cumulative Return</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={cumulativeData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer></Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Return Comparison</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={weeklyChartData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="portfolioReturn" fill="#1e3a5f" name="Portfolio" radius={[4,4,0,0]}/><Line type="monotone" dataKey="benchmarkReturn" stroke="#94a3b8" strokeWidth={2} name="S&P 500" /><Line type="monotone" dataKey="excessReturn" stroke="#059669" strokeWidth={2} strokeDasharray="5 5" name="Excess" /></ComposedChart></ResponsiveContainer></Card>
     </div>
-    <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Basket-Level Attribution (Active + Exited)</h3>
-      <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Theme","Deployed","PnL $","Return","Avg β","Mkt Contrib","Alpha"].map(h=><th key={h} className="py-2 px-3 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
-      <tbody>{basket.sort((a,b)=>Math.abs(b.pnl)-Math.abs(a.pnl)).map(b=><tr key={b.theme} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-3"><ThemeBadge theme={b.theme}/></td><td className="py-2 px-3">{fmt.usd(b.deployed)}</td><td className={`py-2 px-3 font-medium ${b.pnl>=0?"text-emerald-600":"text-red-500"}`}>{fmt.usd(b.pnl)}</td><td className={`py-2 px-3 font-medium ${b.br>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(b.br)}</td><td className="py-2 px-3">{fmt.num(b.me)}</td><td className="py-2 px-3">{fmt.pct(b.mc)}</td><td className={`py-2 px-3 font-medium ${b.al>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(b.al)}</td></tr>)}</tbody></table></Card>
+    <div className="grid grid-cols-1 xl:grid-cols-[0.92fr_1.08fr] gap-4">
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Return Table</h3>
+        <div className="max-h-[360px] overflow-y-auto">
+          <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Week","Date","Portfolio","Benchmark","Excess"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
+          <tbody>{weeklyTable.map((row)=><tr key={row.week} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-2 font-medium text-slate-700">{row.week}</td><td className="py-2 px-2 text-slate-500">{fmt.date(row.date)}</td><td className={`py-2 px-2 font-medium ${row.portfolioReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.portfolioReturn)}</td><td className={`py-2 px-2 font-medium ${row.benchmarkReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.benchmarkReturn)}</td><td className={`py-2 px-2 font-medium ${row.excessReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.excessReturn)}</td></tr>)}</tbody></table>
+        </div>
+      </Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Theme PnL Summary (Active + Exited)</h3>
+        <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Theme","Deployed","Current Value","PnL $","Return","Book Share"].map(h=><th key={h} className="py-2 px-3 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
+        <tbody>{basket.map((row)=><tr key={row.theme} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-3"><ThemeBadge theme={row.theme}/></td><td className="py-2 px-3">{fmt.usd(row.deployed)}</td><td className="py-2 px-3">{fmt.usd(row.currentValue)}</td><td className={`py-2 px-3 font-medium ${row.pnl >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.usd(row.pnl)}</td><td className={`py-2 px-3 font-medium ${row.returnPct >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.returnPct)}</td><td className="py-2 px-3">{fmt.pct(row.shareOfBook, 1)}</td></tr>)}</tbody></table>
+      </Card>
+    </div>
   </div>;
 }
 
