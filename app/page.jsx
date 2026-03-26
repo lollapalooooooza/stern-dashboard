@@ -18,7 +18,12 @@ import {
 const calc = {
   pnlDollar: (cp, bp, s) => (cp - bp) * s,
   pnlPercent: (cp, bp) => (bp !== 0 ? (cp - bp) / bp : 0),
-  portfolioBeta: (h) => h.reduce((s, x) => s + (x.weight || 0) * (x.marketBeta || 0), 0),
+  holdingBeta: (holding) => {
+    const marketBeta = Number(holding.marketBeta) || 0;
+    const benchmarkWeight = Math.min(Math.max(Number(holding.benchmarkWeight) || 0, 0), 1);
+    return 1 + (marketBeta - 1) * (1 - benchmarkWeight);
+  },
+  portfolioBeta: (h) => h.reduce((s, x) => s + (x.weight || 0) * calc.holdingBeta(x), 0),
   systematicVol: (pb, bv) => Math.abs(pb) * bv,
   idiosyncraticVol: (pv, sv) => Math.sqrt(Math.max(pv * pv - sv * sv, 0)),
   trackingError: (pb, bv, iv) => Math.sqrt(Math.pow(pb - 1, 2) * bv * bv + iv * iv),
@@ -53,6 +58,21 @@ const getThemeColor = (theme, i) => THEME_COLORS[theme] || CHART_COLORS[i % CHAR
 const GROUP_COLORS = { thematic:"#2563eb", opportunistic:"#7c3aed", systematic:"#059669", bond:"#d97706" };
 const GROUP_LABELS = { thematic:"Thematic", opportunistic:"Opportunistic", systematic:"Systematic", bond:"Bond" };
 
+const holdingValue = (holding) => Number(holding.currentValue) || Number(holding.shares) * Number(holding.currentPrice);
+
+function applyPricesToHoldings(holdings, prices) {
+  if (!prices || Object.keys(prices).length === 0) return holdings;
+  return holdings.map((holding) => {
+    if (holding.status !== "active") return holding;
+    const nextPrice = prices[holding.ticker];
+    if (nextPrice == null) return holding;
+    const currentPrice = Number(nextPrice);
+    const currentValue = Number(holding.shares) * currentPrice;
+    const pnlFromExcel = calc.pnlDollar(currentPrice, Number(holding.buyPrice), Number(holding.shares));
+    return { ...holding, currentPrice, currentValue, pnlFromExcel };
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // DATABASE HOOK — group-aware, auto-fetches prices on load
 // ═══════════════════════════════════════════════════════════════════
@@ -66,6 +86,7 @@ function useDatabase(group) {
   const [loaded, setLoaded] = useState(false);
   const [priceLoading, setPL] = useState(false);
   const [lastPriceUpdate, setLPU] = useState(null);
+  const autoPriceGroupRef = useRef(null);
 
   useEffect(() => {
     setLoaded(false);
@@ -89,25 +110,34 @@ function useDatabase(group) {
     })();
   }, [group]);
 
+  useEffect(() => {
+    autoPriceGroupRef.current = null;
+    setLPU(null);
+  }, [group]);
+
   // Auto-fetch prices on load
   useEffect(() => {
-    if (!loaded || holdings.length === 0) return;
+    if (!loaded || holdings.length === 0 || autoPriceGroupRef.current === group) return;
     const activeCount = holdings.filter(h => h.status === "active" && h.ticker !== "SPY").length;
     if (activeCount === 0) return;
+    autoPriceGroupRef.current = group;
     (async () => {
       setPL(true);
       try {
         const r = await fetch("/api/prices", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ group }) });
         const d = await r.json();
-        if (d.count > 0 && d.dbUpdated) {
-          const fresh = await fetch(`/api/holdings?group=${group}`).then(r=>r.json());
-          if (fresh.holdings?.length) setHL(fresh.holdings);
+        if (d.count > 0) {
+          setHL((current) => applyPricesToHoldings(current, d.prices));
+          if (d.dbUpdated) {
+            const fresh = await fetch(`/api/holdings?group=${group}`).then(r=>r.json());
+            setHL(fresh.holdings || []);
+          }
           setLPU(`${new Date().toLocaleTimeString()} (${d.count})`);
         }
       } catch (e) { console.warn("Auto price:", e.message); }
       setPL(false);
     })();
-  }, [loaded, group]);
+  }, [loaded, holdings, group]);
 
   const setHoldings = useCallback(async (newH) => {
     setHL(newH);
@@ -140,8 +170,11 @@ function useDatabase(group) {
       const r = await fetch("/api/prices", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ group }) });
       const d = await r.json();
       if (d.count > 0) {
-        const fresh = await fetch(`/api/holdings?group=${group}`).then(r=>r.json());
-        if (fresh.holdings?.length) setHL(fresh.holdings);
+        setHL((current) => applyPricesToHoldings(current, d.prices));
+        if (d.dbUpdated) {
+          const fresh = await fetch(`/api/holdings?group=${group}`).then(r=>r.json());
+          setHL(fresh.holdings || []);
+        }
         setLPU(`${new Date().toLocaleTimeString()} (${d.count})`);
       } else alert("No prices returned. Yahoo may be blocking.");
     } catch (e) { alert("Price error: " + e.message); }
@@ -215,14 +248,14 @@ function NewsFeed({ tickers }) {
 function computeHoldings(holdings) {
   const active = holdings.filter(h => h.status === "active");
   const exited = holdings.filter(h => h.status === "exited");
-  const totalVal = active.reduce((s, h) => s + (h.currentValue || h.shares * h.currentPrice), 0);
+  const totalVal = active.reduce((s, h) => s + holdingValue(h), 0);
   const totalRealizedPnl = exited.reduce((s, h) => s + (h.realizedPnl || h.pnlFromExcel || 0), 0);
   // Total cost basis = all active at buy price + all exited cost basis (includes SPY)
   const totalCostBasis = active.reduce((s, h) => s + h.shares * h.buyPrice, 0) + exited.reduce((s, h) => s + (h.costBasis || h.shares * h.buyPrice || 0), 0);
   const computed = active.map(h => {
-    const pv = h.currentValue || h.shares * h.currentPrice;
+    const pv = holdingValue(h);
     const w = totalVal > 0 ? pv / totalVal : 0;
-    return { ...h, positionValue: pv, weight: w, pnlPercent: calc.pnlPercent(h.currentPrice, h.buyPrice), pnlDollar: h.pnlFromExcel || calc.pnlDollar(h.currentPrice, h.buyPrice, h.shares) };
+    return { ...h, positionValue: pv, weight: w, effectiveBeta: calc.holdingBeta(h), pnlPercent: calc.pnlPercent(h.currentPrice, h.buyPrice), pnlDollar: h.pnlFromExcel || calc.pnlDollar(h.currentPrice, h.buyPrice, h.shares) };
   });
   return { totalVal, active, exited, computed, totalRealizedPnl, totalCostBasis };
 }
@@ -258,7 +291,7 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
       <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(startingVal > 0 ? unrealizedPnl / startingVal : 0)} trend={unrealizedPnl >= 0 ? "up" : "down"} color={unrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open positions gain/loss\nvs starting value ${fmt.usd(startingVal)}`} /> 
       <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(startingVal > 0 ? totalRealizedPnl / startingVal : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nvs starting value ${fmt.usd(startingVal)}`} /> 
       <StatCard label="Total Return" value={fmt.usd(totalPnlFromBalance)} sub={fmt.pct(cumReturn)} trend={cumReturn >= 0 ? "up" : "down"} color={cumReturn >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`From account balances\nStart: ${fmt.usd(startingVal)}\nNow: ${fmt.usd(totalVal)}\nMatches cumulative chart`} />
-      <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × β_i)"/>
+      <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × adjusted β_i), where benchmark overlap pulls holding beta toward 1.00"/>
       <StatCard label="Tracking Error" value={fmt.pct(te)} icon={Activity}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
       <StatCard label="Active" value={computed.length} icon={Briefcase} sub={`${exited.length} exited`}/>
@@ -447,7 +480,7 @@ function RiskPage({ holdings, settings }) {
   const {computed}=computeHoldings(holdings);const pb=calc.portfolioBeta(computed);
   const sv=calc.systematicVol(pb,settings.benchmarkVol);const iv=calc.idiosyncraticVol(settings.portfolioVol,sv);const te=calc.trackingError(pb,settings.benchmarkVol,iv);
   const themes=[...new Set(computed.map(h=>h.theme))];
-  const themeRisk=themes.map((t,i)=>{const th=computed.filter(h=>h.theme===t);const tw=th.reduce((s,h)=>s+h.weight,0);const wb=th.reduce((s,h)=>s+h.weight*h.marketBeta,0);return{theme:t,weight:tw,avgBeta:tw>0?wb/tw:0,riskContrib:pb>0?wb/pb:0,weightedRisk:tw>0?(pb>0?wb/pb:0)/tw:0,fill:getThemeColor(t,i)};});
+  const themeRisk=themes.map((t,i)=>{const th=computed.filter(h=>h.theme===t);const tw=th.reduce((s,h)=>s+h.weight,0);const wb=th.reduce((s,h)=>s+h.weight*h.effectiveBeta,0);return{theme:t,weight:tw,avgBeta:tw>0?wb/tw:0,riskContrib:pb>0?wb/pb:0,weightedRisk:tw>0?(pb>0?wb/pb:0)/tw:0,fill:getThemeColor(t,i)};});
   const maxSW=Math.max(...computed.map(h=>h.weight));const spyW=computed.find(h=>h.ticker==="SPY")?.weight||0;
   const checks=[{metric:"Daily VaR 95%",current:calc.dailyVaR95(settings.portfolioVol),limit:settings.limits.dailyVaR95},{metric:"Tracking Error",current:te,limit:settings.limits.trackingError},{metric:"Beta Deviation",current:Math.abs(pb-1),limit:settings.limits.betaDeviation},{metric:"Systematic Vol",current:sv,limit:settings.limits.systematicVol},{metric:"Max Stock Weight",current:maxSW,limit:settings.limits.maxStockWeight},{metric:"S&P Weight",current:spyW,limit:settings.limits.spyWeight}].map(c=>({...c,utilization:calc.utilization(c.current,c.limit),status:calc.complianceStatus(c.current,c.limit),headroom:c.limit-c.current}));
   const [showWeighted, setShowWeighted] = useState(false);
@@ -455,7 +488,7 @@ function RiskPage({ holdings, settings }) {
   return <div className="space-y-6">
     <SectionHeader title="Risk Analytics"/>
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio β" value={fmt.num(pb)} icon={Shield}/><StatCard label="Tracking Error" value={fmt.pct(te)}/><StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/><StatCard label="Daily VaR 99%" value={fmt.pct(calc.dailyVaR99(settings.portfolioVol))}/><StatCard label="Systematic Vol" value={fmt.pct(sv)}/><StatCard label="Idiosyncratic Vol" value={fmt.pct(iv)}/>
+      <StatCard label="Portfolio β" value={fmt.num(pb)} icon={Shield} tooltip="Uses position weights and adjusted holding betas, including benchmark overlap."/><StatCard label="Tracking Error" value={fmt.pct(te)}/><StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/><StatCard label="Daily VaR 99%" value={fmt.pct(calc.dailyVaR99(settings.portfolioVol))}/><StatCard label="Systematic Vol" value={fmt.pct(sv)}/><StatCard label="Idiosyncratic Vol" value={fmt.pct(iv)}/>
     </div>
     <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Compliance</h3>
       <table className="w-full text-sm"><thead><tr className="bg-slate-50 border-b">{["Metric","Current","Limit","Utilization","Status"].map(h=><th key={h} className="py-2.5 px-3 text-left text-xs font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
