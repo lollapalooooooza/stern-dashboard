@@ -476,23 +476,254 @@ function ReturnsPage({ holdings, settings, weeklyHistory }) {
 // ═══════════════════════════════════════════════════════════════════
 // RISK
 // ═══════════════════════════════════════════════════════════════════
-function RiskPage({ holdings, settings }) {
-  const {computed}=computeHoldings(holdings);const pb=calc.portfolioBeta(computed);
-  const sv=calc.systematicVol(pb,settings.benchmarkVol);const iv=calc.idiosyncraticVol(settings.portfolioVol,sv);const te=calc.trackingError(pb,settings.benchmarkVol,iv);
-  const themes=[...new Set(computed.map(h=>h.theme))];
-  const themeRisk=themes.map((t,i)=>{const th=computed.filter(h=>h.theme===t);const tw=th.reduce((s,h)=>s+h.weight,0);const wb=th.reduce((s,h)=>s+h.weight*h.effectiveBeta,0);return{theme:t,weight:tw,avgBeta:tw>0?wb/tw:0,riskContrib:pb>0?wb/pb:0,weightedRisk:tw>0?(pb>0?wb/pb:0)/tw:0,fill:getThemeColor(t,i)};});
-  const maxSW=Math.max(...computed.map(h=>h.weight));const spyW=computed.find(h=>h.ticker==="SPY")?.weight||0;
-  const checks=[{metric:"Daily VaR 95%",current:calc.dailyVaR95(settings.portfolioVol),limit:settings.limits.dailyVaR95},{metric:"Tracking Error",current:te,limit:settings.limits.trackingError},{metric:"Beta Deviation",current:Math.abs(pb-1),limit:settings.limits.betaDeviation},{metric:"Systematic Vol",current:sv,limit:settings.limits.systematicVol},{metric:"Max Stock Weight",current:maxSW,limit:settings.limits.maxStockWeight},{metric:"S&P Weight",current:spyW,limit:settings.limits.spyWeight}].map(c=>({...c,utilization:calc.utilization(c.current,c.limit),status:calc.complianceStatus(c.current,c.limit),headroom:c.limit-c.current}));
+function buildRegressionHistory(weeklyHistory) {
+  return weeklyHistory.map((row) => {
+    const portfolioReturn = Number(row.portfolioReturn) || 0;
+    const benchmarkReturn = Number(row.benchmarkReturn) || 0;
+    const marketContrib = Number(row.marketContrib) || 0;
+    const valueContrib = Number(row.valueContrib) || 0;
+    const momentumContrib = Number(row.momentumContrib) || 0;
+    const reportedAlpha = Number(row.alpha) || 0;
+    const predictedReturn = marketContrib + valueContrib + momentumContrib;
+    const residualGap = portfolioReturn - predictedReturn;
+    return {
+      ...row,
+      portfolioReturn,
+      benchmarkReturn,
+      marketContrib,
+      valueContrib,
+      momentumContrib,
+      reportedAlpha,
+      predictedReturn,
+      residualGap,
+    };
+  });
+}
+
+function buildDrawdownSeries(regressionHistory) {
+  let actualNav = 1;
+  let predictedNav = 1;
+  let benchmarkNav = 1;
+  let actualPeakLevel = 1;
+  let predictedPeakLevel = 1;
+  let benchmarkPeakLevel = 1;
+  let actualPeakWeek = "Start";
+  let predictedPeakWeek = "Start";
+  let benchmarkPeakWeek = "Start";
+  let actualPeakDate = "";
+  let predictedPeakDate = "";
+  let benchmarkPeakDate = "";
+
+  return regressionHistory.map((row) => {
+    actualNav *= 1 + row.portfolioReturn;
+    predictedNav *= 1 + row.predictedReturn;
+    benchmarkNav *= 1 + row.benchmarkReturn;
+
+    if (actualNav >= actualPeakLevel) {
+      actualPeakLevel = actualNav;
+      actualPeakWeek = row.week;
+      actualPeakDate = row.date;
+    }
+    if (predictedNav >= predictedPeakLevel) {
+      predictedPeakLevel = predictedNav;
+      predictedPeakWeek = row.week;
+      predictedPeakDate = row.date;
+    }
+    if (benchmarkNav >= benchmarkPeakLevel) {
+      benchmarkPeakLevel = benchmarkNav;
+      benchmarkPeakWeek = row.week;
+      benchmarkPeakDate = row.date;
+    }
+
+    return {
+      ...row,
+      actualNavLevel: actualNav,
+      predictedNavLevel: predictedNav,
+      benchmarkNavLevel: benchmarkNav,
+      actualPeakLevel,
+      predictedPeakLevel,
+      benchmarkPeakLevel,
+      actualPeakWeek,
+      predictedPeakWeek,
+      benchmarkPeakWeek,
+      actualPeakDate,
+      predictedPeakDate,
+      benchmarkPeakDate,
+      actualDrawdown: actualNav / actualPeakLevel - 1,
+      predictedDrawdown: predictedNav / predictedPeakLevel - 1,
+      benchmarkDrawdown: benchmarkNav / benchmarkPeakLevel - 1,
+    };
+  });
+}
+
+function summarizeDrawdown(drawdownSeries, config) {
+  const { drawdownKey, navKey, peakLevelKey, peakWeekKey, peakDateKey } = config;
+  if (!drawdownSeries.length) {
+    return { worstDrawdown: 0, peakWeek: "—", troughWeek: "—", recoveryWeek: "—" };
+  }
+  let worst = drawdownSeries[0];
+  for (const row of drawdownSeries) {
+    if (row[drawdownKey] < worst[drawdownKey]) worst = row;
+  }
+  const worstIndex = drawdownSeries.indexOf(worst);
+  const recovery = drawdownSeries.slice(worstIndex + 1).find((row) => row[navKey] >= worst[peakLevelKey] - 1e-9);
+  return {
+    worstDrawdown: worst[drawdownKey],
+    peakWeek: worst[peakWeekKey] || "Start",
+    peakDate: worst[peakDateKey] || "",
+    troughWeek: worst.week || "—",
+    troughDate: worst.date || "",
+    recoveryWeek: recovery?.week || "Not yet",
+    recoveryDate: recovery?.date || "",
+  };
+}
+
+function buildSubThemeRiskAttribution(computed, lastWeek) {
+  if (!computed.length || !lastWeek) return [];
+
+  const benchmarkReturn = Number(lastWeek.benchmarkReturn) || 0;
+  const portfolioValueExposure = computed.reduce((s, h) => s + (h.weight || 0) * (Number(h.valueBeta) || 0), 0);
+  const portfolioMomentumExposure = computed.reduce((s, h) => s + (h.weight || 0) * (Number(h.momentumBeta) || 0), 0);
+  const valueFactorReturn = Math.abs(portfolioValueExposure) > 1e-9 ? (Number(lastWeek.valueContrib) || 0) / portfolioValueExposure : 0;
+  const momentumFactorReturn = Math.abs(portfolioMomentumExposure) > 1e-9 ? (Number(lastWeek.momentumContrib) || 0) / portfolioMomentumExposure : 0;
+
+  const grouped = computed.reduce((acc, holding) => {
+    const key = holding.subTheme || holding.theme || "Other";
+    if (!acc[key]) {
+      acc[key] = {
+        subTheme: key,
+        weight: 0,
+        marketExposure: 0,
+        valueExposure: 0,
+        momentumExposure: 0,
+        actualContribution: 0,
+      };
+    }
+    const weight = holding.weight || 0;
+    acc[key].weight += weight;
+    acc[key].marketExposure += weight * (holding.effectiveBeta || calc.holdingBeta(holding));
+    acc[key].valueExposure += weight * (Number(holding.valueBeta) || 0);
+    acc[key].momentumExposure += weight * (Number(holding.momentumBeta) || 0);
+    acc[key].actualContribution += weight * (Number(holding.weeklyReturn) || 0);
+    return acc;
+  }, {});
+
+  return Object.values(grouped)
+    .map((row) => {
+      const marketContrib = row.marketExposure * benchmarkReturn;
+      const valueContrib = row.valueExposure * valueFactorReturn;
+      const momentumContrib = row.momentumExposure * momentumFactorReturn;
+      const predictedContribution = marketContrib + valueContrib + momentumContrib;
+      const actualContribution = row.actualContribution;
+      return {
+        ...row,
+        avgBeta: row.weight > 0 ? row.marketExposure / row.weight : 0,
+        marketContrib,
+        valueContrib,
+        momentumContrib,
+        predictedContribution,
+        actualContribution,
+        residualGap: actualContribution - predictedContribution,
+        predictedReturn: row.weight > 0 ? predictedContribution / row.weight : 0,
+        actualReturn: row.weight > 0 ? actualContribution / row.weight : 0,
+      };
+    })
+    .sort((a, b) => Math.abs(b.predictedContribution) - Math.abs(a.predictedContribution));
+}
+
+function RiskPage({ holdings, settings, weeklyHistory }) {
+  const { computed } = computeHoldings(holdings);
+  const pb = calc.portfolioBeta(computed);
+  const sv = calc.systematicVol(pb, settings.benchmarkVol);
+  const iv = calc.idiosyncraticVol(settings.portfolioVol, sv);
+  const te = calc.trackingError(pb, settings.benchmarkVol, iv);
+  const regressionHistory = buildRegressionHistory(weeklyHistory);
+  const drawdownSeries = buildDrawdownSeries(regressionHistory);
+  const lastWeek = regressionHistory.at(-1);
+  const themes = [...new Set(computed.map((h) => h.theme))];
+  const themeRisk = themes.map((t, i) => {
+    const th = computed.filter((h) => h.theme === t);
+    const tw = th.reduce((s, h) => s + h.weight, 0);
+    const wb = th.reduce((s, h) => s + h.weight * h.effectiveBeta, 0);
+    return {
+      theme: t,
+      weight: tw,
+      avgBeta: tw > 0 ? wb / tw : 0,
+      riskContrib: pb > 0 ? wb / pb : 0,
+      weightedRisk: tw > 0 ? (pb > 0 ? wb / pb : 0) / tw : 0,
+      fill: getThemeColor(t, i),
+    };
+  });
+  const maxSW = Math.max(...computed.map((h) => h.weight), 0);
+  const spyW = computed.find((h) => h.ticker === "SPY")?.weight || 0;
+  const checks = [
+    { metric: "Daily VaR 95%", current: calc.dailyVaR95(settings.portfolioVol), limit: settings.limits.dailyVaR95 },
+    { metric: "Tracking Error", current: te, limit: settings.limits.trackingError },
+    { metric: "Beta Deviation", current: Math.abs(pb - 1), limit: settings.limits.betaDeviation },
+    { metric: "Systematic Vol", current: sv, limit: settings.limits.systematicVol },
+    { metric: "Max Stock Weight", current: maxSW, limit: settings.limits.maxStockWeight },
+    { metric: "S&P Weight", current: spyW, limit: settings.limits.spyWeight },
+  ].map((c) => ({ ...c, utilization: calc.utilization(c.current, c.limit), status: calc.complianceStatus(c.current, c.limit), headroom: c.limit - c.current }));
+  const subThemeRisk = buildSubThemeRiskAttribution(computed, lastWeek);
+  const topSubThemes = subThemeRisk.slice(0, 10);
+  const drawdownSummaries = [
+    {
+      label: "Actual",
+      ...summarizeDrawdown(drawdownSeries, {
+        drawdownKey: "actualDrawdown",
+        navKey: "actualNavLevel",
+        peakLevelKey: "actualPeakLevel",
+        peakWeekKey: "actualPeakWeek",
+        peakDateKey: "actualPeakDate",
+      }),
+    },
+    {
+      label: "Regression",
+      ...summarizeDrawdown(drawdownSeries, {
+        drawdownKey: "predictedDrawdown",
+        navKey: "predictedNavLevel",
+        peakLevelKey: "predictedPeakLevel",
+        peakWeekKey: "predictedPeakWeek",
+        peakDateKey: "predictedPeakDate",
+      }),
+    },
+    {
+      label: "Benchmark",
+      ...summarizeDrawdown(drawdownSeries, {
+        drawdownKey: "benchmarkDrawdown",
+        navKey: "benchmarkNavLevel",
+        peakLevelKey: "benchmarkPeakLevel",
+        peakWeekKey: "benchmarkPeakWeek",
+        peakDateKey: "benchmarkPeakDate",
+      }),
+    },
+  ];
+  const factorRows = lastWeek ? [
+    { factor: "Market", contribution: lastWeek.marketContrib },
+    { factor: "Value", contribution: lastWeek.valueContrib },
+    { factor: "Momentum", contribution: lastWeek.momentumContrib },
+    { factor: "Residual Gap", contribution: lastWeek.residualGap },
+  ] : [];
+  const dominantFactor = factorRows.length ? [...factorRows].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))[0] : null;
+  const largestSubTheme = topSubThemes[0] || null;
   const [showWeighted, setShowWeighted] = useState(false);
 
   return <div className="space-y-6">
-    <SectionHeader title="Risk Analytics"/>
+    <SectionHeader title="Risk Analytics" subtitle="Exposures, weekly regression attribution, sub-theme risk, and drawdown regime analysis"/>
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio β" value={fmt.num(pb)} icon={Shield} tooltip="Uses position weights and adjusted holding betas, including benchmark overlap."/><StatCard label="Tracking Error" value={fmt.pct(te)}/><StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/><StatCard label="Daily VaR 99%" value={fmt.pct(calc.dailyVaR99(settings.portfolioVol))}/><StatCard label="Systematic Vol" value={fmt.pct(sv)}/><StatCard label="Idiosyncratic Vol" value={fmt.pct(iv)}/>
+      <StatCard label="Portfolio β" value={fmt.num(pb)} icon={Shield} tooltip="Uses position weights and adjusted holding betas, including benchmark overlap."/>
+      <StatCard label="Tracking Error" value={fmt.pct(te)}/>
+      <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
+      <StatCard label="Daily VaR 99%" value={fmt.pct(calc.dailyVaR99(settings.portfolioVol))}/>
+      <StatCard label="Systematic Vol" value={fmt.pct(sv)}/>
+      <StatCard label="Idiosyncratic Vol" value={fmt.pct(iv)}/>
     </div>
+
     <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Compliance</h3>
       <table className="w-full text-sm"><thead><tr className="bg-slate-50 border-b">{["Metric","Current","Limit","Utilization","Status"].map(h=><th key={h} className="py-2.5 px-3 text-left text-xs font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
-      <tbody>{checks.map(c=><tr key={c.metric} className="border-b hover:bg-slate-50"><td className="py-2.5 px-3 font-semibold text-slate-700">{c.metric}</td><td className="py-2.5 px-3">{fmt.pct(c.current)}</td><td className="py-2.5 px-3 text-slate-500">{fmt.pct(c.limit)}</td><td className="py-2.5 px-3"><div className="flex items-center gap-2"><div className="flex-1 bg-slate-100 rounded-full h-2 max-w-[120px]"><div className="h-2 rounded-full" style={{width:`${Math.min(c.utilization*100,100)}%`,backgroundColor:statusBg(c.status)}}/></div><span className="text-xs font-medium">{fmt.pct(c.utilization,0)}</span></div></td><td className="py-2.5 px-3"><Badge status={c.status}/></td></tr>)}</tbody></table></Card>
+      <tbody>{checks.map(c=><tr key={c.metric} className="border-b hover:bg-slate-50"><td className="py-2.5 px-3 font-semibold text-slate-700">{c.metric}</td><td className="py-2.5 px-3">{fmt.pct(c.current)}</td><td className="py-2.5 px-3 text-slate-500">{fmt.pct(c.limit)}</td><td className="py-2.5 px-3"><div className="flex items-center gap-2"><div className="flex-1 bg-slate-100 rounded-full h-2 max-w-[120px]"><div className="h-2 rounded-full" style={{width:`${Math.min(c.utilization*100,100)}%`,backgroundColor:statusBg(c.status)}}/></div><span className="text-xs font-medium">{fmt.pct(c.utilization,0)}</span></div></td><td className="py-2.5 px-3"><Badge status={c.status}/></td></tr>)}</tbody></table>
+    </Card>
+
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card className="p-4">
         <div className="flex items-center justify-between mb-3">
@@ -505,6 +736,75 @@ function RiskPage({ holdings, settings }) {
       </Card>
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Theme Risk Profile</h3><table className="w-full text-xs"><thead><tr className="border-b">{["Theme","Weight","Avg β","Risk %","Risk/Weight"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500">{h}</th>)}</tr></thead><tbody>{themeRisk.map(t=><tr key={t.theme} className="border-b border-slate-100"><td className="py-1.5 px-2"><ThemeBadge theme={t.theme}/></td><td className="py-1.5 px-2">{fmt.pct(t.weight,1)}</td><td className="py-1.5 px-2">{fmt.num(t.avgBeta)}</td><td className="py-1.5 px-2">{fmt.pct(t.riskContrib,1)}</td><td className="py-1.5 px-2 font-semibold">{fmt.num(t.weightedRisk)}</td></tr>)}</tbody></table></Card>
     </div>
+
+    <Card className="p-4">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-700">Past Week Risk Attribution</h3>
+          <p className="text-xs text-slate-500">{lastWeek ? `${lastWeek.week} · ${fmt.date(lastWeek.date)}` : "No weekly history yet"}</p>
+        </div>
+      </div>
+      {lastWeek ? <>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <StatCard label="Actual Return" value={fmt.pct(lastWeek.portfolioReturn)} trend={lastWeek.portfolioReturn>=0?"up":"down"} color={lastWeek.portfolioReturn>=0?"text-emerald-700":"text-red-600"}/>
+          <StatCard label="Regression Predicted" value={fmt.pct(lastWeek.predictedReturn)} trend={lastWeek.predictedReturn>=0?"up":"down"} color={lastWeek.predictedReturn>=0?"text-emerald-700":"text-red-600"}/>
+          <StatCard label="Model Gap" value={fmt.pct(lastWeek.residualGap)} trend={lastWeek.residualGap>=0?"up":"down"} color={lastWeek.residualGap>=0?"text-emerald-700":"text-red-600"}/>
+          <StatCard label="Benchmark" value={fmt.pct(lastWeek.benchmarkReturn)}/>
+        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-[1.3fr_0.9fr] gap-4">
+          <Card className="p-4 bg-slate-50 border-slate-200">
+            <p className="text-sm text-slate-700 leading-6">
+              The portfolio returned <span className="font-semibold text-slate-900">{fmt.pct(lastWeek.portfolioReturn)}</span> last week versus a regression-implied <span className="font-semibold text-slate-900">{fmt.pct(lastWeek.predictedReturn)}</span>, leaving a residual gap of <span className={`font-semibold ${lastWeek.residualGap >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(lastWeek.residualGap)}</span>.
+            </p>
+            <p className="text-sm text-slate-700 leading-6 mt-3">
+              {dominantFactor ? `The largest single driver was ${dominantFactor.factor.toLowerCase()}, contributing ${fmt.pct(dominantFactor.contribution)}.` : "Factor attribution becomes available once weekly history is populated."} {largestSubTheme ? `On the cross-section, ${largestSubTheme.subTheme} carried the biggest modeled sub-theme contribution at ${fmt.pct(largestSubTheme.predictedContribution)}.` : ""}
+            </p>
+          </Card>
+          <Card className="p-4">
+            <h4 className="text-sm font-semibold text-slate-700 mb-3">Last Week Factor Breakdown</h4>
+            <table className="w-full text-xs"><thead><tr className="border-b">{["Factor","Contribution","Share of Prediction"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500">{h}</th>)}</tr></thead>
+            <tbody>{factorRows.map((row)=>{const share=lastWeek.predictedReturn!==0?row.contribution/lastWeek.predictedReturn:0;return <tr key={row.factor} className="border-b border-slate-100"><td className="py-2 px-2 text-slate-700 font-medium">{row.factor}</td><td className={`py-2 px-2 font-medium ${row.contribution>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(row.contribution)}</td><td className="py-2 px-2">{row.factor==="Residual Gap"?"—":fmt.pct(share)}</td></tr>;})}</tbody></table>
+          </Card>
+        </div>
+      </> : <p className="text-sm text-slate-500">No weekly history available yet.</p>}
+      {regressionHistory.length > 0 && <div className="mt-4"><ResponsiveContainer width="100%" height={320}><ComposedChart data={regressionHistory}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="marketContrib" stackId="a" fill="#1e3a5f" name="Market"/><Bar dataKey="valueContrib" stackId="a" fill="#2563eb" name="Value"/><Bar dataKey="momentumContrib" stackId="a" fill="#7c3aed" name="Momentum"/><Bar dataKey="residualGap" stackId="a" fill="#f97316" name="Gap"/><Line type="monotone" dataKey="portfolioReturn" stroke="#0f172a" strokeWidth={2.5} name="Actual"/><Line type="monotone" dataKey="predictedReturn" stroke="#059669" strokeWidth={2} strokeDasharray="5 5" name="Predicted"/></ComposedChart></ResponsiveContainer></div>}
+    </Card>
+
+    <div className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-4">
+      <Card className="p-4">
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">Sub-Theme Weekly Risk Attribution</h3>
+        {topSubThemes.length > 0 ? <ResponsiveContainer width="100%" height={320}><BarChart data={topSubThemes}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="subTheme" tick={{fontSize:10}} interval={0} angle={-20} textAnchor="end" height={70}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="predictedContribution" fill="#1e3a5f" name="Predicted"/><Bar dataKey="actualContribution" fill="#059669" name="Actual"/></BarChart></ResponsiveContainer> : <p className="text-sm text-slate-500">Sub-theme attribution appears when holdings and weekly data are available.</p>}
+      </Card>
+      <Card className="p-4">
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">Sub-Theme Breakdown Table</h3>
+        <div className="max-h-[320px] overflow-y-auto">
+          <table className="w-full text-xs"><thead><tr className="border-b">{["Sub-Theme","Weight","Avg β","Predicted","Actual","Gap"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500">{h}</th>)}</tr></thead>
+          <tbody>{subThemeRisk.map((row)=><tr key={row.subTheme} className="border-b border-slate-100"><td className="py-2 px-2 text-slate-700 font-medium">{row.subTheme}</td><td className="py-2 px-2">{fmt.pct(row.weight,1)}</td><td className="py-2 px-2">{fmt.num(row.avgBeta)}</td><td className={`py-2 px-2 font-medium ${row.predictedContribution>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(row.predictedContribution)}</td><td className={`py-2 px-2 font-medium ${row.actualContribution>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(row.actualContribution)}</td><td className={`py-2 px-2 font-medium ${row.residualGap>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(row.residualGap)}</td></tr>)}</tbody></table>
+        </div>
+      </Card>
+    </div>
+
+    <Card className="p-4">
+      <h3 className="text-sm font-semibold text-slate-700 mb-3">Drawdown Analysis</h3>
+      {drawdownSeries.length > 0 ? <>
+        <ResponsiveContainer width="100%" height={320}><LineChart data={drawdownSeries}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Line type="monotone" dataKey="actualDrawdown" stroke="#0f172a" strokeWidth={2.5} name="Actual Drawdown"/><Line type="monotone" dataKey="predictedDrawdown" stroke="#059669" strokeWidth={2} strokeDasharray="5 5" name="Regression Drawdown"/><Line type="monotone" dataKey="benchmarkDrawdown" stroke="#94a3b8" strokeWidth={2} name="Benchmark Drawdown"/></LineChart></ResponsiveContainer>
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_0.9fr] gap-4 mt-4">
+          <Card className="p-4 bg-slate-50 border-slate-200">
+            <p className="text-sm text-slate-700 leading-6">
+              The worst realized drawdown reached <span className="font-semibold text-red-600">{fmt.pct(drawdownSummaries[0].worstDrawdown)}</span> from {drawdownSummaries[0].peakWeek} into {drawdownSummaries[0].troughWeek}. The model drawdown bottomed at <span className="font-semibold text-slate-900">{fmt.pct(drawdownSummaries[1].worstDrawdown)}</span>, so the stress gap was <span className={`font-semibold ${(drawdownSummaries[0].worstDrawdown - drawdownSummaries[1].worstDrawdown) >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(drawdownSummaries[0].worstDrawdown - drawdownSummaries[1].worstDrawdown)}</span>.
+            </p>
+            {drawdownSeries.length > 0 && <p className="text-sm text-slate-700 leading-6 mt-3">
+              At the realized trough ({drawdownSummaries[0].troughWeek}), market contributed {fmt.pct(drawdownSeries.find((row)=>row.week===drawdownSummaries[0].troughWeek)?.marketContrib || 0)}, value contributed {fmt.pct(drawdownSeries.find((row)=>row.week===drawdownSummaries[0].troughWeek)?.valueContrib || 0)}, momentum contributed {fmt.pct(drawdownSeries.find((row)=>row.week===drawdownSummaries[0].troughWeek)?.momentumContrib || 0)}, and the residual gap was {fmt.pct(drawdownSeries.find((row)=>row.week===drawdownSummaries[0].troughWeek)?.residualGap || 0)}.
+            </p>}
+          </Card>
+          <Card className="p-4">
+            <h4 className="text-sm font-semibold text-slate-700 mb-3">Drawdown Breakdown Table</h4>
+            <table className="w-full text-xs"><thead><tr className="border-b">{["Series","Worst DD","Peak","Trough","Recovery"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500">{h}</th>)}</tr></thead>
+            <tbody>{drawdownSummaries.map((row)=><tr key={row.label} className="border-b border-slate-100"><td className="py-2 px-2 text-slate-700 font-medium">{row.label}</td><td className={`py-2 px-2 font-medium ${row.worstDrawdown>=0?"text-emerald-600":"text-red-500"}`}>{fmt.pct(row.worstDrawdown)}</td><td className="py-2 px-2">{row.peakWeek}</td><td className="py-2 px-2">{row.troughWeek}</td><td className="py-2 px-2">{row.recoveryWeek}</td></tr>)}</tbody></table>
+          </Card>
+        </div>
+      </> : <p className="text-sm text-slate-500">Drawdown analysis needs weekly history.</p>}
+    </Card>
   </div>;
 }
 
@@ -636,7 +936,7 @@ export default function App() {
           {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
           {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
           {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
-          {page==="risk" && <RiskPage holdings={db.holdings} settings={db.settings}/>}
+          {page==="risk" && <RiskPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
           {page==="stoploss" && <StopLossPage holdings={db.holdings} settings={db.settings}/>}
           {page==="report" && <TeamReportPage holdings={db.holdings} settings={db.settings} report={db.report} setReport={db.setReport} reportMeta={db.reportMeta} setReportMeta={db.setReportMeta}/>}
           {page==="settings" && <SettingsPage settings={db.settings} setSettings={db.setSettings} holdings={db.holdings} setHoldings={db.setHoldings} weeklyHistory={db.weeklyHistory} setWeeklyHistory={db.setWeeklyHistory} group={group}/>}
