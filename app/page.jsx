@@ -91,6 +91,64 @@ function buildCumulativeReturnSeries(rows) {
   });
 }
 
+function parseWeekNumber(week) {
+  const match = String(week || "").match(/^W(\d+)$/i);
+  return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+}
+
+function normalizeWeeklyHistoryRows(rows) {
+  const cleaned = (rows || [])
+    .map((row, index) => ({
+      ...row,
+      week: String(row.week || "").trim(),
+      date: row.date ? String(row.date).slice(0, 10) : "",
+      portfolioReturn: Number(row.portfolioReturn) || 0,
+      benchmarkReturn: Number(row.benchmarkReturn) || 0,
+      marketContrib: Number(row.marketContrib) || 0,
+      valueContrib: Number(row.valueContrib) || 0,
+      momentumContrib: Number(row.momentumContrib) || 0,
+      alpha: Number(row.alpha) || 0,
+      _index: index,
+    }))
+    .filter((row) => row.date || row.week);
+
+  cleaned.sort((a, b) => {
+    if (a.date && b.date && a.date !== b.date) return a.date.localeCompare(b.date);
+    const weekDiff = parseWeekNumber(a.week) - parseWeekNumber(b.week);
+    if (weekDiff !== 0) return weekDiff;
+    return a._index - b._index;
+  });
+
+  const byKey = new Map();
+  for (const row of cleaned) {
+    const key = row.date || row.week || String(row._index);
+    byKey.set(key, row);
+  }
+
+  return [...byKey.values()]
+    .sort((a, b) => {
+      if (a.date && b.date && a.date !== b.date) return a.date.localeCompare(b.date);
+      const weekDiff = parseWeekNumber(a.week) - parseWeekNumber(b.week);
+      if (weekDiff !== 0) return weekDiff;
+      return a._index - b._index;
+    })
+    .map((row, index) => ({
+      week: `W${index + 1}`,
+      date: row.date,
+      portfolioReturn: row.portfolioReturn,
+      benchmarkReturn: row.benchmarkReturn,
+      marketContrib: row.marketContrib,
+      valueContrib: row.valueContrib,
+      momentumContrib: row.momentumContrib,
+      alpha: row.alpha,
+    }));
+}
+
+function formatPriceUpdateLabel(payload) {
+  const stamp = payload?.updated ? new Date(payload.updated) : new Date();
+  return `${stamp.toLocaleTimeString()} (${payload?.count || 0})`;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // DATABASE HOOK — group-aware snapshot state plus manual price refresh
 // ═══════════════════════════════════════════════════════════════════
@@ -106,7 +164,10 @@ function useDatabase(group) {
   const [lastPriceUpdate, setLPU] = useState(null);
 
   useEffect(() => {
+    let cancelled = false;
     setLoaded(false);
+    setPL(true);
+    setLPU(null);
     (async () => {
       try {
         const [hR,sR,wR,rR] = await Promise.all([
@@ -115,16 +176,44 @@ function useDatabase(group) {
           fetch(`/api/history?group=${group}`).then(r=>r.json()).catch(()=>({history:[]})),
           fetch(`/api/report?group=${group}`).then(r=>r.json()).catch(()=>({content:"",meta:{}})),
         ]);
-        if (hR.holdings?.length) setHL(hR.holdings);
-        else setHL([]);
-        if (sR.settings && Object.keys(sR.settings).length) setSL(sR.settings);
-        if (wR.history?.length) setWL(wR.history);
-        else setWL([]);
-        if (rR.content) setRL(rR.content); else setRL("");
-        if (rR.meta) setRML(rR.meta); else setRML({});
+        let nextHoldings = hR.holdings || [];
+        const nextSettings = sR.settings && Object.keys(sR.settings).length ? sR.settings : { benchmarkVol:0.122, portfolioVol:0.168, riskFreeRate:0.045, spyWeeklyReturn:-0.01508, iveWeeklyReturn:0.005, mtumWeeklyReturn:0.008, cashBalance:0, warningThreshold:0.85, stopLossWarningBuffer:0.05, limits:{ dailyVaR95:0.025, trackingError:0.06, betaDeviation:0.3, systematicVol:0.2, maxStockWeight:0.08, spyWeight:0.5 } };
+        const nextWeeklyHistory = normalizeWeeklyHistoryRows(wR.history || []);
+        const nextReport = rR.content || "";
+        const nextReportMeta = rR.meta || {};
+
+        try {
+          const priceResponse = await fetch("/api/prices", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ group }),
+          });
+          const pricePayload = await priceResponse.json();
+          if (!priceResponse.ok) throw new Error(pricePayload.error || "Price refresh failed");
+          if (pricePayload.count > 0) {
+            nextHoldings = applyPricesToHoldings(nextHoldings, pricePayload.prices);
+            if (pricePayload.dbUpdated) {
+              const fresh = await fetch(`/api/holdings?group=${group}`).then((response) => response.json()).catch(() => ({ holdings: nextHoldings }));
+              nextHoldings = fresh.holdings || nextHoldings;
+            }
+            if (!cancelled) setLPU(formatPriceUpdateLabel(pricePayload));
+          }
+        } catch (error) {
+          console.error("Auto price refresh:", error);
+        } finally {
+          if (!cancelled) setPL(false);
+        }
+
+        if (cancelled) return;
+        setHL(nextHoldings);
+        setSL(nextSettings);
+        setWL(nextWeeklyHistory);
+        setRL(nextReport);
+        setRML(nextReportMeta);
       } catch (e) { console.error("DB load:", e); }
-      setLoaded(true);
+      if (!cancelled) setLoaded(true);
     })();
+    return () => { cancelled = true; };
   }, [group]);
 
   const setHoldings = useCallback(async (newH) => {
@@ -138,8 +227,9 @@ function useDatabase(group) {
   }, [group]);
 
   const setWeeklyHistory = useCallback(async (newW) => {
-    setWL(newW);
-    try { await fetch("/api/history", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ history:newW, group }) }); } catch {}
+    const normalized = normalizeWeeklyHistoryRows(newW);
+    setWL(normalized);
+    try { await fetch("/api/history", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ history:normalized, group }) }); } catch {}
   }, [group]);
 
   const setReport = useCallback(async (c) => {
@@ -163,7 +253,7 @@ function useDatabase(group) {
           const fresh = await fetch(`/api/holdings?group=${group}`).then(r=>r.json());
           setHL(fresh.holdings || []);
         }
-        setLPU(`${new Date().toLocaleTimeString()} (${d.count})`);
+        setLPU(formatPriceUpdateLabel(d));
       } else alert("No prices returned. Yahoo may be blocking.");
     } catch (e) { alert("Price error: " + e.message); }
     setPL(false);
@@ -254,6 +344,7 @@ function computeHoldings(holdings, settings) {
 // OVERVIEW
 // ═══════════════════════════════════════════════════════════════════
 function OverviewPage({ holdings, settings, weeklyHistory }) {
+  const normalizedHistory = useMemo(() => normalizeWeeklyHistoryRows(weeklyHistory), [weeklyHistory]);
   const { totalVal, investedVal, cashBalance, computed, exited, totalRealizedPnl, totalCostBasis } = computeHoldings(holdings, settings);
   const unrealizedPnl = computed.reduce((s,h) => s+h.pnlDollar, 0);
   const activeCostBasis = computed.reduce((s,h) => s + Number(h.shares) * Number(h.buyPrice), 0);
@@ -268,7 +359,7 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
   const te = calc.trackingError(portBeta, settings.benchmarkVol, idioVol);
   const themes = [...new Set(computed.map(h=>h.theme))];
   const themeAlloc = themes.map((t,i) => ({name:t,value:computed.filter(h=>h.theme===t).reduce((s,h)=>s+h.weight,0),fill:getThemeColor(t,i)}));
-  const cumData = buildCumulativeReturnSeries(weeklyHistory);
+  const cumData = buildCumulativeReturnSeries(normalizedHistory);
   const pnlSorted = [...stocksOnly].sort((a,b)=>b.pnlDollar-a.pnlDollar);
   const pnlChart = [...pnlSorted.slice(0,5),...pnlSorted.slice(-5)];
   const tickers = stocksOnly.map(h=>h.ticker);
@@ -524,6 +615,7 @@ function buildWeeklyContributionByGroup(rows, field) {
 }
 
 function ReturnsPage({ holdings, weeklyHistory, settings }) {
+  const normalizedHistory = useMemo(() => normalizeWeeklyHistoryRows(weeklyHistory), [weeklyHistory]);
   const { computed, exited, totalVal } = computeHoldings(holdings, settings);
   const activeStocks = computed.filter((holding) => holding.theme !== "Benchmark");
   const allHoldings = [
@@ -561,13 +653,13 @@ function ReturnsPage({ holdings, weeklyHistory, settings }) {
     })
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
 
-  const weeklyChartData = weeklyHistory.map((row) => ({
+  const weeklyChartData = normalizedHistory.map((row) => ({
     ...row,
     excessReturn: (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0),
     explainedReturn: Number(row.marketContrib || 0),
     selectionReturn: Number(row.alpha || 0),
   }));
-  const cumulativeData = buildCumulativeReturnSeries(weeklyHistory);
+  const cumulativeData = buildCumulativeReturnSeries(normalizedHistory);
   const cumulativePortfolio = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].portfolio : 0;
   const cumulativeBenchmark = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].benchmark : 0;
   const excessReturn = cumulativePortfolio - cumulativeBenchmark;
@@ -587,9 +679,9 @@ function ReturnsPage({ holdings, weeklyHistory, settings }) {
     .sort((a, b) => Math.abs(b.weeklyContribution) - Math.abs(a.weeklyContribution));
 
   return <div className="space-y-6">
-    <SectionHeader title="Returns" subtitle={`Workbook-backed weekly history, current attribution, and drawdown analysis across ${weeklyHistory.length} weeks`} />
+    <SectionHeader title="Returns" subtitle={`Workbook-backed weekly history, current attribution, and drawdown analysis across ${normalizedHistory.length} weeks`} />
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-      <StatCard label="Cumulative Return" value={fmt.pct(cumulativePortfolio)} trend={cumulativePortfolio >= 0 ? "up" : "down"} color={cumulativePortfolio >= 0 ? "text-emerald-700" : "text-red-600"} tooltip={`Compounded from ${weeklyHistory.length} reconstructed weeks`} />
+      <StatCard label="Cumulative Return" value={fmt.pct(cumulativePortfolio)} trend={cumulativePortfolio >= 0 ? "up" : "down"} color={cumulativePortfolio >= 0 ? "text-emerald-700" : "text-red-600"} tooltip={`Compounded from ${normalizedHistory.length} reconstructed weeks`} />
       <StatCard label="Benchmark" value={fmt.pct(cumulativeBenchmark)} />
       <StatCard label="Excess Return" value={fmt.pct(excessReturn)} trend={excessReturn >= 0 ? "up" : "down"} color={excessReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
       <StatCard label="Hit Rate" value={fmt.pct(hitRate)} sub={`${weeklyChartData.filter((row) => row.portfolioReturn > 0).length}/${weeklyChartData.length || 0} up weeks`} />
