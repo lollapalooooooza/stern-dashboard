@@ -92,19 +92,18 @@ function buildCumulativeReturnSeries(rows) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// DATABASE HOOK — group-aware, auto-fetches prices on load
+// DATABASE HOOK — group-aware snapshot state plus manual price refresh
 // ═══════════════════════════════════════════════════════════════════
 
 function useDatabase(group) {
   const [holdings, setHL] = useState([]);
-  const [settings, setSL] = useState({ benchmarkVol:0.122, portfolioVol:0.168, riskFreeRate:0.045, spyWeeklyReturn:-0.01508, iveWeeklyReturn:0.005, mtumWeeklyReturn:0.008, warningThreshold:0.85, stopLossWarningBuffer:0.05, limits:{ dailyVaR95:0.025, trackingError:0.06, betaDeviation:0.3, systematicVol:0.2, maxStockWeight:0.08, spyWeight:0.5 } });
+  const [settings, setSL] = useState({ benchmarkVol:0.122, portfolioVol:0.168, riskFreeRate:0.045, spyWeeklyReturn:-0.01508, iveWeeklyReturn:0.005, mtumWeeklyReturn:0.008, cashBalance:0, warningThreshold:0.85, stopLossWarningBuffer:0.05, limits:{ dailyVaR95:0.025, trackingError:0.06, betaDeviation:0.3, systematicVol:0.2, maxStockWeight:0.08, spyWeight:0.5 } });
   const [weeklyHistory, setWL] = useState([]);
   const [report, setRL] = useState("");
   const [reportMeta, setRML] = useState({});
   const [loaded, setLoaded] = useState(false);
   const [priceLoading, setPL] = useState(false);
   const [lastPriceUpdate, setLPU] = useState(null);
-  const autoPriceGroupRef = useRef(null);
 
   useEffect(() => {
     setLoaded(false);
@@ -127,35 +126,6 @@ function useDatabase(group) {
       setLoaded(true);
     })();
   }, [group]);
-
-  useEffect(() => {
-    autoPriceGroupRef.current = null;
-    setLPU(null);
-  }, [group]);
-
-  // Auto-fetch prices on load
-  useEffect(() => {
-    if (!loaded || holdings.length === 0 || autoPriceGroupRef.current === group) return;
-    const activeCount = holdings.filter(h => h.status === "active").length;
-    if (activeCount === 0) return;
-    autoPriceGroupRef.current = group;
-    (async () => {
-      setPL(true);
-      try {
-        const r = await fetch("/api/prices", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ group }) });
-        const d = await r.json();
-        if (d.count > 0) {
-          setHL((current) => applyPricesToHoldings(current, d.prices));
-          if (d.dbUpdated) {
-            const fresh = await fetch(`/api/holdings?group=${group}`).then(r=>r.json());
-            setHL(fresh.holdings || []);
-          }
-          setLPU(`${new Date().toLocaleTimeString()} (${d.count})`);
-        }
-      } catch (e) { console.warn("Auto price:", e.message); }
-      setPL(false);
-    })();
-  }, [loaded, holdings, group]);
 
   const setHoldings = useCallback(async (newH) => {
     setHL(newH);
@@ -263,10 +233,12 @@ function NewsFeed({ tickers }) {
   </Card>;
 }
 
-function computeHoldings(holdings) {
+function computeHoldings(holdings, settings) {
   const active = holdings.filter(h => h.status === "active");
   const exited = holdings.filter(h => h.status === "exited");
-  const totalVal = active.reduce((s, h) => s + activePositionValue(h), 0);
+  const investedVal = active.reduce((s, h) => s + activePositionValue(h), 0);
+  const cashBalance = Number(settings?.cashBalance) || 0;
+  const totalVal = investedVal + cashBalance;
   const totalRealizedPnl = exited.reduce((s, h) => s + (h.realizedPnl || h.pnlFromExcel || 0), 0);
   // Total cost basis = all active at buy price + all exited cost basis (includes SPY)
   const totalCostBasis = active.reduce((s, h) => s + h.shares * h.buyPrice, 0) + exited.reduce((s, h) => s + (h.costBasis || h.shares * h.buyPrice || 0), 0);
@@ -275,14 +247,14 @@ function computeHoldings(holdings) {
     const w = totalVal > 0 ? pv / totalVal : 0;
     return { ...h, positionValue: pv, weight: w, effectiveBeta: calc.holdingBeta(h), pnlPercent: calc.pnlPercent(h.currentPrice, h.buyPrice), pnlDollar: activePnlDollar(h) };
   });
-  return { totalVal, active, exited, computed, totalRealizedPnl, totalCostBasis };
+  return { totalVal, investedVal, cashBalance, active, exited, computed, totalRealizedPnl, totalCostBasis };
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // OVERVIEW
 // ═══════════════════════════════════════════════════════════════════
 function OverviewPage({ holdings, settings, weeklyHistory }) {
-  const { totalVal, computed, exited, totalRealizedPnl, totalCostBasis } = computeHoldings(holdings);
+  const { totalVal, investedVal, cashBalance, computed, exited, totalRealizedPnl, totalCostBasis } = computeHoldings(holdings, settings);
   const unrealizedPnl = computed.reduce((s,h) => s+h.pnlDollar, 0);
   const activeCostBasis = computed.reduce((s,h) => s + Number(h.shares) * Number(h.buyPrice), 0);
   const realizedCostBasis = exited.reduce((s,h) => s + (Number(h.costBasis) || Number(h.shares) * Number(h.buyPrice) || 0), 0);
@@ -304,8 +276,8 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
 
   return <div className="space-y-6">
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Active non-benchmark: ${fmt.usd(totalVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}\nDerived from shares × latest price`} />
-      <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(activeCostBasis > 0 ? unrealizedPnl / activeCostBasis : 0)} trend={unrealizedPnl >= 0 ? "up" : "down"} color={unrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from holdings\nCost basis: ${fmt.usd(activeCostBasis)}\nValue: ${fmt.usd(totalVal)}`} /> 
+      <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Stock holdings: ${fmt.usd(investedVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}\nCash: ${fmt.usd(cashBalance)}\nDerived from workbook snapshot and holdings prices`} />
+      <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(activeCostBasis > 0 ? unrealizedPnl / activeCostBasis : 0)} trend={unrealizedPnl >= 0 ? "up" : "down"} color={unrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from active holdings\nCost basis: ${fmt.usd(activeCostBasis)}\nInvested value: ${fmt.usd(investedVal)}`} /> 
       <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(realizedCostBasis > 0 ? totalRealizedPnl / realizedCostBasis : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usd(realizedCostBasis)}`} /> 
       <StatCard label="Total Return" value={fmt.usd(totalPnl)} sub={fmt.pct(totalReturnPct)} trend={totalPnl >= 0 ? "up" : "down"} color={totalPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Unrealized + realized PnL\nTotal cost basis: ${fmt.usd(totalCostBasis)}\nCompounded return series: ${fmt.pct(cumReturn)}`} />
       <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × adjusted β_i), where benchmark overlap pulls holding beta toward 1.00"/>
@@ -350,7 +322,9 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
   const handleSave = async () => { setSS("saving"); await setHoldings(holdings); setTimeout(()=>setSS("saved"),300); setTimeout(()=>setSS(null),2500); };
 
   const themes = ["All",...new Set(holdings.map(h=>h.theme))];
-  const totalVal = holdings.filter(h=>h.status==="active").reduce((s,h)=>s+activePositionValue(h),0);
+  const investedTotal = holdings.filter(h=>h.status==="active").reduce((s,h)=>s+activePositionValue(h),0);
+  const cashBalance = Number(settings?.cashBalance) || 0;
+  const totalVal = investedTotal + cashBalance;
   const totalRealized = holdings.filter(h=>h.status==="exited").reduce((s,h)=>s+(h.realizedPnl||h.pnlFromExcel||0),0);
 
   const computed = useMemo(()=>{
@@ -401,7 +375,7 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
     .map((h)=>({ ...h, positionValue: activePositionValue(h) }));
   const benchmarkTotal = activeSummary.filter((h)=>h.theme==="Benchmark").reduce((sum,h)=>sum+h.positionValue,0);
   const stockTotal = activeSummary.filter((h)=>h.theme!=="Benchmark").reduce((sum,h)=>sum+h.positionValue,0);
-  const portfolioTotal = stockTotal + benchmarkTotal;
+  const portfolioTotal = stockTotal + benchmarkTotal + cashBalance;
   const sectionTotals = Object.values(activeSummary.reduce((acc,h)=>{
     if (h.theme==="Benchmark") return acc;
     const key = h.theme;
@@ -450,11 +424,11 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
           <p className="text-xs text-slate-500">Portfolio, stock book, benchmark, and section totals from current active holdings.</p>
         </div>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Portfolio Total</p>
           <p className="mt-1 text-lg font-bold text-slate-800">{fmt.usd(portfolioTotal)}</p>
-          <p className="text-xs text-slate-500">{activeCount} active holdings</p>
+          <p className="text-xs text-slate-500">{activeCount} active holdings + {fmt.usd(cashBalance)} cash</p>
         </div>
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-blue-700">Stock Holdings</p>
@@ -465,6 +439,11 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-600">Benchmark (S&amp;P 500)</p>
           <p className="mt-1 text-lg font-bold text-slate-900">{fmt.usd(benchmarkTotal)}</p>
           <p className="text-xs text-slate-500">{fmt.pct(portfolioTotal > 0 ? benchmarkTotal / portfolioTotal : 0, 1)} of active portfolio</p>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Cash</p>
+          <p className="mt-1 text-lg font-bold text-slate-800">{fmt.usd(cashBalance)}</p>
+          <p className="text-xs text-slate-500">{fmt.pct(portfolioTotal > 0 ? cashBalance / portfolioTotal : 0, 1)} of portfolio</p>
         </div>
       </div>
       <div className="overflow-x-auto">
@@ -494,21 +473,65 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// RETURNS — workbook-backed historical returns + current basket summary
+// RETURNS — workbook-backed history, attribution, and drawdown analysis
 // ═══════════════════════════════════════════════════════════════════
-function ReturnsPage({ holdings, weeklyHistory }) {
-  const { computed, exited, totalVal } = computeHoldings(holdings);
-  const activeCostBasis = computed.reduce((sum, holding) => sum + Number(holding.shares) * Number(holding.buyPrice), 0);
-  const exitedCostBasis = exited.reduce((sum, holding) => sum + (Number(holding.costBasis) || Number(holding.shares) * Number(holding.buyPrice) || 0), 0);
-  const totalDeployed = activeCostBasis + exitedCostBasis;
-  const totalCurrentVal = totalVal + exited.reduce((sum, holding) => sum + exitedPositionValue(holding), 0);
-  const totalPnl = totalCurrentVal - totalDeployed;
+function buildReturnDrawdownSeries(rows) {
+  let portfolioNav = 1;
+  let benchmarkNav = 1;
+  let portfolioPeak = 1;
+  let benchmarkPeak = 1;
+  return rows.map((row) => {
+    portfolioNav *= 1 + (Number(row.portfolioReturn) || 0);
+    benchmarkNav *= 1 + (Number(row.benchmarkReturn) || 0);
+    portfolioPeak = Math.max(portfolioPeak, portfolioNav);
+    benchmarkPeak = Math.max(benchmarkPeak, benchmarkNav);
+    return {
+      ...row,
+      portfolioNav,
+      benchmarkNav,
+      portfolioDrawdown: portfolioNav / portfolioPeak - 1,
+      benchmarkDrawdown: benchmarkNav / benchmarkPeak - 1,
+    };
+  });
+}
 
+function summarizeReturnDrawdown(drawdownSeries, key) {
+  if (!drawdownSeries.length) return { worstDrawdown: 0, peakWeek: "—", troughWeek: "—" };
+  let worst = drawdownSeries[0];
+  let peakWeek = "Start";
+  let peakLevel = 1;
+  for (const row of drawdownSeries) {
+    const navKey = key === "portfolioDrawdown" ? "portfolioNav" : "benchmarkNav";
+    if (row[navKey] >= peakLevel) {
+      peakLevel = row[navKey];
+      peakWeek = row.week;
+    }
+    if (row[key] < worst[key]) worst = { ...row, peakWeek };
+  }
+  return { worstDrawdown: worst[key], peakWeek: worst.peakWeek || "Start", troughWeek: worst.week || "—", troughDate: worst.date || "" };
+}
+
+function buildWeeklyContributionByGroup(rows, field) {
+  const grouped = rows.reduce((acc, holding) => {
+    const key = holding[field] || holding.theme || "Other";
+    if (!acc[key]) acc[key] = { label: key, weight: 0, contribution: 0, pnl: 0 };
+    acc[key].weight += holding.weight || 0;
+    acc[key].contribution += (holding.weight || 0) * (Number(holding.weeklyReturn) || 0);
+    acc[key].pnl += Number(holding.pnlDollar) || 0;
+    return acc;
+  }, {});
+  return Object.values(grouped).sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
+}
+
+function ReturnsPage({ holdings, weeklyHistory, settings }) {
+  const { computed, exited, totalVal } = computeHoldings(holdings, settings);
+  const activeStocks = computed.filter((holding) => holding.theme !== "Benchmark");
   const allHoldings = [
     ...computed.map((holding) => ({
       ...holding,
       deployedValue: Number(holding.shares) * Number(holding.buyPrice),
       currentValueForTheme: holding.positionValue,
+      weeklyContribution: (holding.weight || 0) * (Number(holding.weeklyReturn) || 0),
     })),
     ...exited.map((holding) => ({
       ...holding,
@@ -516,21 +539,24 @@ function ReturnsPage({ holdings, weeklyHistory }) {
       currentValueForTheme: exitedPositionValue(holding),
       pnlDollar: Number(holding.realizedPnl) || Number(holding.pnlFromExcel) || 0,
       pnlPercent: Number(holding.realizedPnlPct) || ((Number(holding.costBasis) || 0) > 0 ? (Number(holding.realizedPnl) || 0) / Number(holding.costBasis) : 0),
+      weeklyContribution: 0,
     })),
   ];
+  const totalDeployed = allHoldings.reduce((sum, holding) => sum + (holding.deployedValue || 0), 0);
   const basket = [...new Set(allHoldings.map((holding) => holding.theme))]
     .map((theme) => {
       const themeHoldings = allHoldings.filter((holding) => holding.theme === theme);
       const deployed = themeHoldings.reduce((sum, holding) => sum + (holding.deployedValue || 0), 0);
       const currentValue = themeHoldings.reduce((sum, holding) => sum + (holding.currentValueForTheme || 0), 0);
-      const pnl = currentValue - deployed;
+      const pnl = themeHoldings.reduce((sum, holding) => sum + (holding.pnlDollar || 0), 0);
       return {
         theme,
         deployed,
         currentValue,
         pnl,
+        contribution: totalDeployed > 0 ? pnl / totalDeployed : 0,
         returnPct: deployed > 0 ? pnl / deployed : 0,
-        shareOfBook: totalCurrentVal > 0 ? currentValue / totalCurrentVal : 0,
+        shareOfBook: totalVal > 0 ? currentValue / totalVal : 0,
       };
     })
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
@@ -538,6 +564,8 @@ function ReturnsPage({ holdings, weeklyHistory }) {
   const weeklyChartData = weeklyHistory.map((row) => ({
     ...row,
     excessReturn: (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0),
+    explainedReturn: Number(row.marketContrib || 0),
+    selectionReturn: Number(row.alpha || 0),
   }));
   const cumulativeData = buildCumulativeReturnSeries(weeklyHistory);
   const cumulativePortfolio = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].portfolio : 0;
@@ -546,20 +574,42 @@ function ReturnsPage({ holdings, weeklyHistory }) {
   const bestWeek = weeklyChartData.length ? [...weeklyChartData].sort((a, b) => b.portfolioReturn - a.portfolioReturn)[0] : null;
   const worstWeek = weeklyChartData.length ? [...weeklyChartData].sort((a, b) => a.portfolioReturn - b.portfolioReturn)[0] : null;
   const weeklyTable = [...weeklyChartData].reverse();
+  const hitRate = weeklyChartData.length ? weeklyChartData.filter((row) => row.portfolioReturn > 0).length / weeklyChartData.length : 0;
+  const drawdownSeries = buildReturnDrawdownSeries(weeklyChartData);
+  const portfolioDrawdown = summarizeReturnDrawdown(drawdownSeries, "portfolioDrawdown");
+  const benchmarkDrawdown = summarizeReturnDrawdown(drawdownSeries, "benchmarkDrawdown");
+  const themeWeeklyAttribution = buildWeeklyContributionByGroup(activeStocks, "theme");
+  const holdingDrivers = [...activeStocks]
+    .map((holding) => ({
+      ...holding,
+      weeklyContribution: (holding.weight || 0) * (Number(holding.weeklyReturn) || 0),
+    }))
+    .sort((a, b) => Math.abs(b.weeklyContribution) - Math.abs(a.weeklyContribution));
 
   return <div className="space-y-6">
-    <SectionHeader title="Returns" subtitle="Workbook-derived weekly history plus current holdings and exits" />
+    <SectionHeader title="Returns" subtitle={`Workbook-backed weekly history, current attribution, and drawdown analysis across ${weeklyHistory.length} weeks`} />
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
       <StatCard label="Cumulative Return" value={fmt.pct(cumulativePortfolio)} trend={cumulativePortfolio >= 0 ? "up" : "down"} color={cumulativePortfolio >= 0 ? "text-emerald-700" : "text-red-600"} tooltip={`Compounded from ${weeklyHistory.length} reconstructed weeks`} />
       <StatCard label="Benchmark" value={fmt.pct(cumulativeBenchmark)} />
       <StatCard label="Excess Return" value={fmt.pct(excessReturn)} trend={excessReturn >= 0 ? "up" : "down"} color={excessReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
+      <StatCard label="Hit Rate" value={fmt.pct(hitRate)} sub={`${weeklyChartData.filter((row) => row.portfolioReturn > 0).length}/${weeklyChartData.length || 0} up weeks`} />
       <StatCard label="Best Week" value={bestWeek ? fmt.pct(bestWeek.portfolioReturn) : "—"} sub={bestWeek?.week || "—"} trend={bestWeek && bestWeek.portfolioReturn >= 0 ? "up" : "down"} color={bestWeek && bestWeek.portfolioReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
       <StatCard label="Worst Week" value={worstWeek ? fmt.pct(worstWeek.portfolioReturn) : "—"} sub={worstWeek?.week || "—"} trend="down" color="text-red-600" />
-      <StatCard label="Total PnL" value={fmt.usd(totalPnl)} sub={fmt.pct(totalDeployed > 0 ? totalPnl / totalDeployed : 0)} trend={totalPnl >= 0 ? "up" : "down"} color={totalPnl >= 0 ? "text-emerald-700" : "text-red-600"} />
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Cumulative Return</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={cumulativeData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer></Card>
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Return Comparison</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={weeklyChartData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="portfolioReturn" fill="#1e3a5f" name="Portfolio" radius={[4,4,0,0]}/><Line type="monotone" dataKey="benchmarkReturn" stroke="#94a3b8" strokeWidth={2} name="S&P 500" /><Line type="monotone" dataKey="excessReturn" stroke="#059669" strokeWidth={2} strokeDasharray="5 5" name="Excess" /></ComposedChart></ResponsiveContainer></Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Return Comparison</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={weeklyChartData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="portfolioReturn" fill="#1e3a5f" name="Portfolio" radius={[4,4,0,0]}/><Line type="monotone" dataKey="benchmarkReturn" stroke="#94a3b8" strokeWidth={2} name="S&P 500"/><Line type="monotone" dataKey="excessReturn" stroke="#059669" strokeWidth={2} strokeDasharray="5 5" name="Excess"/></ComposedChart></ResponsiveContainer></Card>
+    </div>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Return Decomposition</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={weeklyChartData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="explainedReturn" stackId="return" fill="#94a3b8" name="Benchmark"/><Bar dataKey="selectionReturn" stackId="return" fill="#059669" name="Selection / Alpha"/><Line type="monotone" dataKey="portfolioReturn" stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/></ComposedChart></ResponsiveContainer></Card>
+      <Card className="p-4">
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">Drawdown Analysis</h3>
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Portfolio Max DD</p><p className="mt-1 text-lg font-bold text-slate-800">{fmt.pct(portfolioDrawdown.worstDrawdown)}</p><p className="text-xs text-slate-500">{portfolioDrawdown.peakWeek} to {portfolioDrawdown.troughWeek}</p></div>
+          <div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Benchmark Max DD</p><p className="mt-1 text-lg font-bold text-slate-800">{fmt.pct(benchmarkDrawdown.worstDrawdown)}</p><p className="text-xs text-slate-500">{benchmarkDrawdown.peakWeek} to {benchmarkDrawdown.troughWeek}</p></div>
+        </div>
+        <ResponsiveContainer width="100%" height={220}><LineChart data={drawdownSeries}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Line type="monotone" dataKey="portfolioDrawdown" stroke="#1e3a5f" strokeWidth={2} name="Portfolio DD"/><Line type="monotone" dataKey="benchmarkDrawdown" stroke="#94a3b8" strokeWidth={2} name="Benchmark DD"/></LineChart></ResponsiveContainer>
+      </Card>
     </div>
     <div className="grid grid-cols-1 xl:grid-cols-[0.92fr_1.08fr] gap-4">
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Return Table</h3>
@@ -571,6 +621,15 @@ function ReturnsPage({ holdings, weeklyHistory }) {
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Theme PnL Summary (Active + Exited)</h3>
         <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Theme","Deployed","Current Value","PnL $","Return","Book Share"].map(h=><th key={h} className="py-2 px-3 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
         <tbody>{basket.map((row)=><tr key={row.theme} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-3"><ThemeBadge theme={row.theme}/></td><td className="py-2 px-3">{fmt.usd(row.deployed)}</td><td className="py-2 px-3">{fmt.usd(row.currentValue)}</td><td className={`py-2 px-3 font-medium ${row.pnl >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.usd(row.pnl)}</td><td className={`py-2 px-3 font-medium ${row.returnPct >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.returnPct)}</td><td className="py-2 px-3">{fmt.pct(row.shareOfBook, 1)}</td></tr>)}</tbody></table>
+      </Card>
+    </div>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Current Week Theme Attribution</h3><ResponsiveContainer width="100%" height={260}><BarChart data={themeWeeklyAttribution}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:10}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Bar dataKey="contribution" name="Contribution" radius={[4,4,0,0]}>{themeWeeklyAttribution.map((row,index)=><Cell key={index} fill={getThemeColor(row.label, index)}/>)}</Bar></BarChart></ResponsiveContainer></Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Current Week Holding Drivers</h3>
+        <div className="max-h-[300px] overflow-y-auto">
+          <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Ticker","Theme","Weight","1W Return","1W Contrib","PnL $"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
+          <tbody>{holdingDrivers.slice(0,12).map((row)=><tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-2 font-medium text-slate-700">{row.ticker}</td><td className="py-2 px-2"><ThemeBadge theme={row.theme}/></td><td className="py-2 px-2">{fmt.pct(row.weight,1)}</td><td className={`py-2 px-2 font-medium ${row.weeklyReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.weeklyReturn)}</td><td className={`py-2 px-2 font-medium ${row.weeklyContribution >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.weeklyContribution,1)}</td><td className={`py-2 px-2 font-medium ${row.pnlDollar >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.usd(row.pnlDollar)}</td></tr>)}</tbody></table>
+        </div>
       </Card>
     </div>
   </div>;
@@ -949,7 +1008,7 @@ function StopLossPage({ holdings, settings }) {
 // TEAM REPORT — save, upload, google doc
 // ═══════════════════════════════════════════════════════════════════
 function TeamReportPage({ holdings, settings, report, setReport, reportMeta, setReportMeta }) {
-  const {totalVal,computed,totalRealizedPnl}=computeHoldings(holdings);const pb=calc.portfolioBeta(computed);
+  const {totalVal,computed,totalRealizedPnl}=computeHoldings(holdings, settings);const pb=calc.portfolioBeta(computed);
   const [ss,setSS]=useState(null);const [uf,setUF]=useState(null);const [gUrl,setGUrl]=useState(reportMeta?.docUrl||"");const [sUrl,setSUrl]=useState(reportMeta?.docUrl||"");const [showDoc,setSD]=useState(!!reportMeta?.docUrl);const [docEdit,setDE]=useState(!reportMeta?.docUrl);const [upEdit,setUE]=useState(!reportMeta?.uploadedFileName);const fr=useRef(null);
 
   const save=async()=>{setSS("saving");await setReport(report);await setReportMeta({...reportMeta,docUrl:sUrl||gUrl,uploadedFileName:uf?.name||reportMeta?.uploadedFileName});setTimeout(()=>setSS("saved"),300);setTimeout(()=>setSS(null),2500);};
