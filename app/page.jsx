@@ -42,6 +42,7 @@ const fmt = {
   num: (v, d = 2) => v != null ? Number(v).toFixed(d) : "—",
   shares: (v) => v != null ? Number(v).toFixed(3) : "—",
   date: (d) => d ? new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—",
+  shortDate: (d) => d ? new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "—",
 };
 
 const statusBg = (s) => s === "BREACH" ? "#ef4444" : s === "WARNING" ? "#f59e0b" : "#10b981";
@@ -144,6 +145,51 @@ function normalizeWeeklyHistoryRows(rows) {
     }));
 }
 
+function normalizeDailyHistoryRows(rows) {
+  const cleaned = (rows || [])
+    .map((row, index) => ({
+      ...row,
+      date: row.date ? String(row.date).slice(0, 10) : "",
+      portfolioValue: Number(row.portfolioValue) || 0,
+      benchmarkValue: Number(row.benchmarkValue) || 0,
+      portfolioReturn: Number(row.portfolioReturn) || 0,
+      benchmarkReturn: Number(row.benchmarkReturn) || 0,
+      marketContrib: Number(row.marketContrib) || 0,
+      valueContrib: Number(row.valueContrib) || 0,
+      momentumContrib: Number(row.momentumContrib) || 0,
+      alpha: Number(row.alpha) || 0,
+      sinceStart: row.sinceStart == null ? null : Number(row.sinceStart) || 0,
+      _index: index,
+    }))
+    .filter((row) => row.date);
+
+  cleaned.sort((a, b) => (a.date !== b.date ? a.date.localeCompare(b.date) : a._index - b._index));
+  const byDate = new Map();
+  for (const row of cleaned) byDate.set(row.date, row);
+
+  return [...byDate.values()]
+    .sort((a, b) => (a.date !== b.date ? a.date.localeCompare(b.date) : a._index - b._index))
+    .map((row) => ({
+      date: row.date,
+      portfolioValue: row.portfolioValue,
+      benchmarkValue: row.benchmarkValue,
+      portfolioReturn: row.portfolioReturn,
+      benchmarkReturn: row.benchmarkReturn,
+      marketContrib: row.marketContrib,
+      valueContrib: row.valueContrib,
+      momentumContrib: row.momentumContrib,
+      alpha: row.alpha,
+      sinceStart: row.sinceStart,
+    }));
+}
+
+function addHistoryLabels(rows, view) {
+  return rows.map((row) => ({
+    ...row,
+    label: view === "daily" ? fmt.shortDate(row.date) : row.week,
+  }));
+}
+
 function formatPriceUpdateLabel(payload) {
   const stamp = payload?.updated ? new Date(payload.updated) : new Date();
   return `${stamp.toLocaleTimeString()} (${payload?.count || 0})`;
@@ -156,6 +202,7 @@ function formatPriceUpdateLabel(payload) {
 function useDatabase(group) {
   const [holdings, setHL] = useState([]);
   const [settings, setSL] = useState({ benchmarkVol:0.122, portfolioVol:0.168, riskFreeRate:0.045, spyWeeklyReturn:-0.01508, iveWeeklyReturn:0.005, mtumWeeklyReturn:0.008, cashBalance:0, warningThreshold:0.85, stopLossWarningBuffer:0.05, limits:{ dailyVaR95:0.025, trackingError:0.06, betaDeviation:0.3, systematicVol:0.2, maxStockWeight:0.08, spyWeight:0.5 } });
+  const [dailyHistory, setDH] = useState([]);
   const [weeklyHistory, setWL] = useState([]);
   const [report, setRL] = useState("");
   const [reportMeta, setRML] = useState({});
@@ -173,11 +220,12 @@ function useDatabase(group) {
         const [hR,sR,wR,rR] = await Promise.all([
           fetch(`/api/holdings?group=${group}`).then(r=>r.json()).catch(()=>({holdings:[]})),
           fetch(`/api/settings?group=${group}`).then(r=>r.json()).catch(()=>({settings:{}})),
-          fetch(`/api/history?group=${group}`).then(r=>r.json()).catch(()=>({history:[]})),
+          fetch(`/api/history?group=${group}`).then(r=>r.json()).catch(()=>({history:[],dailyHistory:[]})),
           fetch(`/api/report?group=${group}`).then(r=>r.json()).catch(()=>({content:"",meta:{}})),
         ]);
         let nextHoldings = hR.holdings || [];
         const nextSettings = sR.settings && Object.keys(sR.settings).length ? sR.settings : { benchmarkVol:0.122, portfolioVol:0.168, riskFreeRate:0.045, spyWeeklyReturn:-0.01508, iveWeeklyReturn:0.005, mtumWeeklyReturn:0.008, cashBalance:0, warningThreshold:0.85, stopLossWarningBuffer:0.05, limits:{ dailyVaR95:0.025, trackingError:0.06, betaDeviation:0.3, systematicVol:0.2, maxStockWeight:0.08, spyWeight:0.5 } };
+        const nextDailyHistory = normalizeDailyHistoryRows(wR.dailyHistory || []);
         const nextWeeklyHistory = normalizeWeeklyHistoryRows(wR.history || []);
         const nextReport = rR.content || "";
         const nextReportMeta = rR.meta || {};
@@ -207,6 +255,7 @@ function useDatabase(group) {
         if (cancelled) return;
         setHL(nextHoldings);
         setSL(nextSettings);
+        setDH(nextDailyHistory);
         setWL(nextWeeklyHistory);
         setRL(nextReport);
         setRML(nextReportMeta);
@@ -229,8 +278,14 @@ function useDatabase(group) {
   const setWeeklyHistory = useCallback(async (newW) => {
     const normalized = normalizeWeeklyHistoryRows(newW);
     setWL(normalized);
-    try { await fetch("/api/history", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ history:normalized, group }) }); } catch {}
-  }, [group]);
+    try { await fetch("/api/history", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ history:normalized, dailyHistory, group }) }); } catch {}
+  }, [dailyHistory, group]);
+
+  const setDailyHistory = useCallback(async (newD) => {
+    const normalized = normalizeDailyHistoryRows(newD);
+    setDH(normalized);
+    try { await fetch("/api/history", { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ history:weeklyHistory, dailyHistory:normalized, group }) }); } catch {}
+  }, [group, weeklyHistory]);
 
   const setReport = useCallback(async (c) => {
     setRL(c);
@@ -259,7 +314,7 @@ function useDatabase(group) {
     setPL(false);
   }, [group]);
 
-  return { loaded, holdings, settings, weeklyHistory, report, reportMeta, setHoldings, setSettings, setWeeklyHistory, setReport, setReportMeta, priceLoading, lastPriceUpdate, refreshPrices };
+  return { loaded, holdings, settings, dailyHistory, weeklyHistory, report, reportMeta, setHoldings, setSettings, setDailyHistory, setWeeklyHistory, setReport, setReportMeta, priceLoading, lastPriceUpdate, refreshPrices };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -340,17 +395,29 @@ function computeHoldings(holdings, settings) {
   return { totalVal, investedVal, cashBalance, active, exited, computed, totalRealizedPnl, totalCostBasis };
 }
 
+function selectReturnHistory(view, weeklyHistory, dailyHistory) {
+  if (view === "daily") return normalizeDailyHistoryRows(dailyHistory).slice(-20);
+  return normalizeWeeklyHistoryRows(weeklyHistory);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // OVERVIEW
 // ═══════════════════════════════════════════════════════════════════
-function OverviewPage({ holdings, settings, weeklyHistory }) {
-  const normalizedHistory = useMemo(() => normalizeWeeklyHistoryRows(weeklyHistory), [weeklyHistory]);
+function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
+  const [returnView, setReturnView] = useState("weekly");
+  const analysisHistory = useMemo(() => selectReturnHistory(returnView, weeklyHistory, dailyHistory), [dailyHistory, returnView, weeklyHistory]);
+  const normalizedDailyHistory = useMemo(() => normalizeDailyHistoryRows(dailyHistory), [dailyHistory]);
   const { totalVal, investedVal, cashBalance, computed, exited, totalRealizedPnl, totalCostBasis } = computeHoldings(holdings, settings);
   const unrealizedPnl = computed.reduce((s,h) => s+h.pnlDollar, 0);
   const activeCostBasis = computed.reduce((s,h) => s + Number(h.shares) * Number(h.buyPrice), 0);
   const realizedCostBasis = exited.reduce((s,h) => s + (Number(h.costBasis) || Number(h.shares) * Number(h.buyPrice) || 0), 0);
   const totalPnl = unrealizedPnl + totalRealizedPnl;
   const totalReturnPct = totalCostBasis > 0 ? totalPnl / totalCostBasis : 0;
+  const latestBalance = normalizedDailyHistory.at(-1);
+  const portfolioStartValue = normalizedDailyHistory[0]?.portfolioValue || null;
+  const displayPortfolioValue = latestBalance?.portfolioValue || totalVal;
+  const displayTotalReturnDollar = latestBalance && portfolioStartValue ? latestBalance.portfolioValue - portfolioStartValue : totalPnl;
+  const displayTotalReturnPct = latestBalance?.sinceStart ?? totalReturnPct;
   const benchH = computed.find(h => h.theme==="Benchmark");
   const stocksOnly = computed.filter(h => h.theme!=="Benchmark");
   const portBeta = calc.portfolioBeta(computed);
@@ -359,7 +426,7 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
   const te = calc.trackingError(portBeta, settings.benchmarkVol, idioVol);
   const themes = [...new Set(computed.map(h=>h.theme))];
   const themeAlloc = themes.map((t,i) => ({name:t,value:computed.filter(h=>h.theme===t).reduce((s,h)=>s+h.weight,0),fill:getThemeColor(t,i)}));
-  const cumData = buildCumulativeReturnSeries(normalizedHistory);
+  const cumData = buildCumulativeReturnSeries(analysisHistory).map((row, index) => ({ ...row, label: returnView === "daily" ? fmt.shortDate(analysisHistory[index]?.date) : analysisHistory[index]?.week }));
   const pnlSorted = [...stocksOnly].sort((a,b)=>b.pnlDollar-a.pnlDollar);
   const pnlChart = [...pnlSorted.slice(0,5),...pnlSorted.slice(-5)];
   const tickers = stocksOnly.map(h=>h.ticker);
@@ -367,10 +434,10 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
 
   return <div className="space-y-6">
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} icon={DollarSign} tooltip={`Stock holdings: ${fmt.usd(investedVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}\nCash: ${fmt.usd(cashBalance)}\nDerived from workbook snapshot and holdings prices`} />
+      <StatCard label="Portfolio Value" value={fmt.usd(displayPortfolioValue)} icon={DollarSign} tooltip={`Balance tracker latest: ${fmt.usd(displayPortfolioValue)}\nHoldings-implied live total: ${fmt.usd(totalVal)}\nStock holdings: ${fmt.usd(investedVal-(benchH?.positionValue||0))}\nBenchmark: ${fmt.usd(benchH?.positionValue||0)}\nCash: ${fmt.usd(cashBalance)}`} />
       <StatCard label="Unrealized PnL" value={fmt.usd(unrealizedPnl)} sub={fmt.pct(activeCostBasis > 0 ? unrealizedPnl / activeCostBasis : 0)} trend={unrealizedPnl >= 0 ? "up" : "down"} color={unrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from active holdings\nCost basis: ${fmt.usd(activeCostBasis)}\nInvested value: ${fmt.usd(investedVal)}`} /> 
-      <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(realizedCostBasis > 0 ? totalRealizedPnl / realizedCostBasis : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usd(realizedCostBasis)}`} /> 
-      <StatCard label="Total Return" value={fmt.usd(totalPnl)} sub={fmt.pct(totalReturnPct)} trend={totalPnl >= 0 ? "up" : "down"} color={totalPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Unrealized + realized PnL\nTotal cost basis: ${fmt.usd(totalCostBasis)}\nCompounded return series: ${fmt.pct(cumReturn)}`} />
+      <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(displayPortfolioValue > 0 ? totalRealizedPnl / displayPortfolioValue : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usd(realizedCostBasis)}\nPercent is measured versus full portfolio value.`} /> 
+      <StatCard label="Total Return" value={fmt.usd(displayTotalReturnDollar)} sub={fmt.pct(displayTotalReturnPct)} trend={displayTotalReturnDollar >= 0 ? "up" : "down"} color={displayTotalReturnDollar >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Balance tracker since start: ${fmt.pct(displayTotalReturnPct)}\nInitial balance: ${fmt.usd(portfolioStartValue || 0)}\nLatest balance: ${fmt.usd(displayPortfolioValue)}\nCompounded selected-series return: ${fmt.pct(cumReturn)}`} />
       <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × adjusted β_i), where benchmark overlap pulls holding beta toward 1.00"/>
       <StatCard label="Tracking Error" value={fmt.pct(te)} icon={Activity}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
@@ -387,8 +454,16 @@ function OverviewPage({ holdings, settings, weeklyHistory }) {
           <div className="w-[45%] space-y-1.5 max-h-[260px] overflow-y-auto pr-1">{themeAlloc.sort((a,b)=>b.value-a.value).map((t,i)=><div key={i} className="flex items-center gap-2"><span className="w-3 h-3 rounded-sm flex-shrink-0" style={{backgroundColor:t.fill}}/><span className="text-xs text-slate-700 flex-1 truncate">{t.name}</span><span className="text-xs font-semibold text-slate-800 tabular-nums">{fmt.pct(t.value,1)}</span></div>)}</div>
         </div></Card>
       <NewsFeed tickers={tickers}/>
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Cumulative Return</h3>
-        <ResponsiveContainer width="100%" height={260}><ComposedChart data={cumData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer></Card>
+      <Card className="p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-700">Cumulative Return</h3>
+          <div className="flex items-center gap-2">
+            <TabButton active={returnView==="weekly"} onClick={()=>setReturnView("weekly")}>Weekly</TabButton>
+            <TabButton active={returnView==="daily"} onClick={()=>setReturnView("daily")}>Daily (20D)</TabButton>
+          </div>
+        </div>
+        <ResponsiveContainer width="100%" height={260}><ComposedChart data={cumData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer>
+      </Card>
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">PnL by Holding (Top/Bottom 5)</h3>
         <ResponsiveContainer width="100%" height={260}><BarChart data={pnlChart}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="ticker" tick={{fontSize:9}}/><YAxis tickFormatter={v=>`$${(v/1000).toFixed(0)}k`} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.usd(v)}/>}/><Bar dataKey="pnlDollar" name="PnL $" radius={[4,4,0,0]}>{pnlChart.map((e,i)=><Cell key={i} fill={e.pnlDollar>=0?"#059669":"#dc2626"}/>)}</Bar></BarChart></ResponsiveContainer></Card>
     </div>
@@ -595,11 +670,11 @@ function summarizeReturnDrawdown(drawdownSeries, key) {
     const navKey = key === "portfolioDrawdown" ? "portfolioNav" : "benchmarkNav";
     if (row[navKey] >= peakLevel) {
       peakLevel = row[navKey];
-      peakWeek = row.week;
+      peakWeek = row.label || row.week || fmt.shortDate(row.date);
     }
     if (row[key] < worst[key]) worst = { ...row, peakWeek };
   }
-  return { worstDrawdown: worst[key], peakWeek: worst.peakWeek || "Start", troughWeek: worst.week || "—", troughDate: worst.date || "" };
+  return { worstDrawdown: worst[key], peakWeek: worst.peakWeek || "Start", troughWeek: worst.label || worst.week || fmt.shortDate(worst.date), troughDate: worst.date || "" };
 }
 
 function buildWeeklyContributionByGroup(rows, field) {
@@ -614,8 +689,8 @@ function buildWeeklyContributionByGroup(rows, field) {
   return Object.values(grouped).sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
 }
 
-function ReturnsPage({ holdings, weeklyHistory, settings }) {
-  const normalizedHistory = useMemo(() => normalizeWeeklyHistoryRows(weeklyHistory), [weeklyHistory]);
+function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings }) {
+  const [returnView, setReturnView] = useState("weekly");
   const { computed, exited, totalVal } = computeHoldings(holdings, settings);
   const activeStocks = computed.filter((holding) => holding.theme !== "Benchmark");
   const allHoldings = [
@@ -653,21 +728,22 @@ function ReturnsPage({ holdings, weeklyHistory, settings }) {
     })
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
 
-  const weeklyChartData = normalizedHistory.map((row) => ({
+  const historyRows = useMemo(() => selectReturnHistory(returnView, weeklyHistory, dailyHistory), [dailyHistory, returnView, weeklyHistory]);
+  const chartData = addHistoryLabels(historyRows, returnView).map((row) => ({
     ...row,
     excessReturn: (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0),
     explainedReturn: Number(row.marketContrib || 0),
     selectionReturn: Number(row.alpha || 0),
   }));
-  const cumulativeData = buildCumulativeReturnSeries(normalizedHistory);
+  const cumulativeData = buildCumulativeReturnSeries(historyRows).map((row, index) => ({ ...row, label: chartData[index]?.label }));
   const cumulativePortfolio = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].portfolio : 0;
   const cumulativeBenchmark = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].benchmark : 0;
   const excessReturn = cumulativePortfolio - cumulativeBenchmark;
-  const bestWeek = weeklyChartData.length ? [...weeklyChartData].sort((a, b) => b.portfolioReturn - a.portfolioReturn)[0] : null;
-  const worstWeek = weeklyChartData.length ? [...weeklyChartData].sort((a, b) => a.portfolioReturn - b.portfolioReturn)[0] : null;
-  const weeklyTable = [...weeklyChartData].reverse();
-  const hitRate = weeklyChartData.length ? weeklyChartData.filter((row) => row.portfolioReturn > 0).length / weeklyChartData.length : 0;
-  const drawdownSeries = buildReturnDrawdownSeries(weeklyChartData);
+  const bestPeriod = chartData.length ? [...chartData].sort((a, b) => b.portfolioReturn - a.portfolioReturn)[0] : null;
+  const worstPeriod = chartData.length ? [...chartData].sort((a, b) => a.portfolioReturn - b.portfolioReturn)[0] : null;
+  const historyTable = [...chartData].reverse();
+  const hitRate = chartData.length ? chartData.filter((row) => row.portfolioReturn > 0).length / chartData.length : 0;
+  const drawdownSeries = buildReturnDrawdownSeries(chartData);
   const portfolioDrawdown = summarizeReturnDrawdown(drawdownSeries, "portfolioDrawdown");
   const benchmarkDrawdown = summarizeReturnDrawdown(drawdownSeries, "benchmarkDrawdown");
   const themeWeeklyAttribution = buildWeeklyContributionByGroup(activeStocks, "theme");
@@ -677,37 +753,45 @@ function ReturnsPage({ holdings, weeklyHistory, settings }) {
       weeklyContribution: (holding.weight || 0) * (Number(holding.weeklyReturn) || 0),
     }))
     .sort((a, b) => Math.abs(b.weeklyContribution) - Math.abs(a.weeklyContribution));
+  const periodNoun = returnView === "daily" ? "days" : "weeks";
+  const comparisonTitle = returnView === "daily" ? "Daily Return Comparison" : "Weekly Return Comparison";
+  const tableTitle = returnView === "daily" ? "Daily Return Table" : "Weekly Return Table";
 
   return <div className="space-y-6">
-    <SectionHeader title="Returns" subtitle={`Workbook-backed weekly history, current attribution, and drawdown analysis across ${normalizedHistory.length} weeks`} />
+    <SectionHeader title="Returns" subtitle={`Workbook-backed ${returnView} history, current attribution, and drawdown analysis across ${historyRows.length} ${periodNoun}`}>
+      <div className="flex items-center gap-2">
+        <TabButton active={returnView==="weekly"} onClick={()=>setReturnView("weekly")}>Weekly</TabButton>
+        <TabButton active={returnView==="daily"} onClick={()=>setReturnView("daily")}>Daily (20D)</TabButton>
+      </div>
+    </SectionHeader>
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-      <StatCard label="Cumulative Return" value={fmt.pct(cumulativePortfolio)} trend={cumulativePortfolio >= 0 ? "up" : "down"} color={cumulativePortfolio >= 0 ? "text-emerald-700" : "text-red-600"} tooltip={`Compounded from ${normalizedHistory.length} reconstructed weeks`} />
+      <StatCard label={returnView === "daily" ? "20D Return" : "Cumulative Return"} value={fmt.pct(cumulativePortfolio)} trend={cumulativePortfolio >= 0 ? "up" : "down"} color={cumulativePortfolio >= 0 ? "text-emerald-700" : "text-red-600"} tooltip={`Compounded from ${historyRows.length} reconstructed ${periodNoun}`} />
       <StatCard label="Benchmark" value={fmt.pct(cumulativeBenchmark)} />
       <StatCard label="Excess Return" value={fmt.pct(excessReturn)} trend={excessReturn >= 0 ? "up" : "down"} color={excessReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
-      <StatCard label="Hit Rate" value={fmt.pct(hitRate)} sub={`${weeklyChartData.filter((row) => row.portfolioReturn > 0).length}/${weeklyChartData.length || 0} up weeks`} />
-      <StatCard label="Best Week" value={bestWeek ? fmt.pct(bestWeek.portfolioReturn) : "—"} sub={bestWeek?.week || "—"} trend={bestWeek && bestWeek.portfolioReturn >= 0 ? "up" : "down"} color={bestWeek && bestWeek.portfolioReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
-      <StatCard label="Worst Week" value={worstWeek ? fmt.pct(worstWeek.portfolioReturn) : "—"} sub={worstWeek?.week || "—"} trend="down" color="text-red-600" />
+      <StatCard label="Hit Rate" value={fmt.pct(hitRate)} sub={`${chartData.filter((row) => row.portfolioReturn > 0).length}/${chartData.length || 0} up ${returnView === "daily" ? "days" : "weeks"}`} />
+      <StatCard label={returnView === "daily" ? "Best Day" : "Best Week"} value={bestPeriod ? fmt.pct(bestPeriod.portfolioReturn) : "—"} sub={bestPeriod?.label || "—"} trend={bestPeriod && bestPeriod.portfolioReturn >= 0 ? "up" : "down"} color={bestPeriod && bestPeriod.portfolioReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
+      <StatCard label={returnView === "daily" ? "Worst Day" : "Worst Week"} value={worstPeriod ? fmt.pct(worstPeriod.portfolioReturn) : "—"} sub={worstPeriod?.label || "—"} trend="down" color="text-red-600" />
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Cumulative Return</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={cumulativeData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer></Card>
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Return Comparison</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={weeklyChartData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="portfolioReturn" fill="#1e3a5f" name="Portfolio" radius={[4,4,0,0]}/><Line type="monotone" dataKey="benchmarkReturn" stroke="#94a3b8" strokeWidth={2} name="S&P 500"/><Line type="monotone" dataKey="excessReturn" stroke="#059669" strokeWidth={2} strokeDasharray="5 5" name="Excess"/></ComposedChart></ResponsiveContainer></Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Cumulative Return</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={cumulativeData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer></Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">{comparisonTitle}</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={chartData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="portfolioReturn" fill="#1e3a5f" name="Portfolio" radius={[4,4,0,0]}/><Line type="monotone" dataKey="benchmarkReturn" stroke="#94a3b8" strokeWidth={2} name="S&P 500"/><Line type="monotone" dataKey="excessReturn" stroke="#059669" strokeWidth={2} strokeDasharray="5 5" name="Excess"/></ComposedChart></ResponsiveContainer></Card>
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Return Decomposition</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={weeklyChartData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="explainedReturn" stackId="return" fill="#94a3b8" name="Benchmark"/><Bar dataKey="selectionReturn" stackId="return" fill="#059669" name="Selection / Alpha"/><Line type="monotone" dataKey="portfolioReturn" stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/></ComposedChart></ResponsiveContainer></Card>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Return Decomposition</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={chartData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="explainedReturn" stackId="return" fill="#94a3b8" name="Benchmark"/><Bar dataKey="selectionReturn" stackId="return" fill="#059669" name="Selection / Alpha"/><Line type="monotone" dataKey="portfolioReturn" stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/></ComposedChart></ResponsiveContainer></Card>
       <Card className="p-4">
         <h3 className="text-sm font-semibold text-slate-700 mb-3">Drawdown Analysis</h3>
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Portfolio Max DD</p><p className="mt-1 text-lg font-bold text-slate-800">{fmt.pct(portfolioDrawdown.worstDrawdown)}</p><p className="text-xs text-slate-500">{portfolioDrawdown.peakWeek} to {portfolioDrawdown.troughWeek}</p></div>
           <div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Benchmark Max DD</p><p className="mt-1 text-lg font-bold text-slate-800">{fmt.pct(benchmarkDrawdown.worstDrawdown)}</p><p className="text-xs text-slate-500">{benchmarkDrawdown.peakWeek} to {benchmarkDrawdown.troughWeek}</p></div>
         </div>
-        <ResponsiveContainer width="100%" height={220}><LineChart data={drawdownSeries}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Line type="monotone" dataKey="portfolioDrawdown" stroke="#1e3a5f" strokeWidth={2} name="Portfolio DD"/><Line type="monotone" dataKey="benchmarkDrawdown" stroke="#94a3b8" strokeWidth={2} name="Benchmark DD"/></LineChart></ResponsiveContainer>
+        <ResponsiveContainer width="100%" height={220}><LineChart data={drawdownSeries}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Line type="monotone" dataKey="portfolioDrawdown" stroke="#1e3a5f" strokeWidth={2} name="Portfolio DD"/><Line type="monotone" dataKey="benchmarkDrawdown" stroke="#94a3b8" strokeWidth={2} name="Benchmark DD"/></LineChart></ResponsiveContainer>
       </Card>
     </div>
     <div className="grid grid-cols-1 xl:grid-cols-[0.92fr_1.08fr] gap-4">
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Weekly Return Table</h3>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">{tableTitle}</h3>
         <div className="max-h-[360px] overflow-y-auto">
-          <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Week","Date","Portfolio","Benchmark","Excess"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
-          <tbody>{weeklyTable.map((row)=><tr key={row.week} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-2 font-medium text-slate-700">{row.week}</td><td className="py-2 px-2 text-slate-500">{fmt.date(row.date)}</td><td className={`py-2 px-2 font-medium ${row.portfolioReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.portfolioReturn)}</td><td className={`py-2 px-2 font-medium ${row.benchmarkReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.benchmarkReturn)}</td><td className={`py-2 px-2 font-medium ${row.excessReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.excessReturn)}</td></tr>)}</tbody></table>
+          <table className="w-full text-xs"><thead><tr className="bg-slate-50 border-b">{["Period","Date","Portfolio","Benchmark","Excess"].map(h=><th key={h} className="py-2 px-2 text-left font-semibold text-slate-500 uppercase">{h}</th>)}</tr></thead>
+          <tbody>{historyTable.map((row)=><tr key={`${row.label}-${row.date}`} className="border-b border-slate-100 hover:bg-slate-50"><td className="py-2 px-2 font-medium text-slate-700">{row.label}</td><td className="py-2 px-2 text-slate-500">{fmt.date(row.date)}</td><td className={`py-2 px-2 font-medium ${row.portfolioReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.portfolioReturn)}</td><td className={`py-2 px-2 font-medium ${row.benchmarkReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.benchmarkReturn)}</td><td className={`py-2 px-2 font-medium ${row.excessReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.excessReturn)}</td></tr>)}</tbody></table>
         </div>
       </Card>
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Theme PnL Summary (Active + Exited)</h3>
@@ -1133,11 +1217,11 @@ function TeamReportPage({ holdings, settings, report, setReport, reportMeta, set
 // ═══════════════════════════════════════════════════════════════════
 // SETTINGS — with save
 // ═══════════════════════════════════════════════════════════════════
-function SettingsPage({ settings, setSettings, holdings, setHoldings, weeklyHistory, setWeeklyHistory, group }) {
+function SettingsPage({ settings, setSettings, holdings, setHoldings, dailyHistory, setDailyHistory, weeklyHistory, setWeeklyHistory, group }) {
   const [showM,setSM]=useState(false);const [ss,setSS]=useState(null);
   const save=async()=>{setSS("saving");await setSettings(settings);setTimeout(()=>setSS("saved"),300);setTimeout(()=>setSS(null),2500);};
-  const expJ=()=>{const d=JSON.stringify({holdings,settings,weeklyHistory},null,2);const b=new Blob([d],{type:"application/json"});const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;a.download=`stern_${group}_data.json`;a.click();};
-  const impJ=()=>{const inp=document.createElement("input");inp.type="file";inp.accept=".json";inp.onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{const p=JSON.parse(ev.target.result);if(p.holdings)setHoldings(p.holdings);if(p.settings)setSettings(p.settings);if(p.weeklyHistory)setWeeklyHistory(p.weeklyHistory);}catch{alert("Invalid JSON");}};r.readAsText(f);};inp.click();};
+  const expJ=()=>{const d=JSON.stringify({holdings,settings,dailyHistory,weeklyHistory},null,2);const b=new Blob([d],{type:"application/json"});const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;a.download=`stern_${group}_data.json`;a.click();};
+  const impJ=()=>{const inp=document.createElement("input");inp.type="file";inp.accept=".json";inp.onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{const p=JSON.parse(ev.target.result);if(p.holdings)setHoldings(p.holdings);if(p.settings)setSettings(p.settings);if(p.dailyHistory)setDailyHistory(p.dailyHistory);if(p.weeklyHistory)setWeeklyHistory(p.weeklyHistory);}catch{alert("Invalid JSON");}};r.readAsText(f);};inp.click();};
   const reset=async()=>{if(!confirm(`Reset ${group} database?`))return;try{await fetch("/api/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({group})});window.location.reload();}catch(e){alert("Reset failed: "+e.message);}};
 
   return <div className="space-y-6">
@@ -1201,13 +1285,13 @@ export default function App() {
         </header>
         )}
         <main className={`flex-1 min-h-0 ${page==='catalyst'?'overflow-hidden p-0 bg-[#0f1117]':'overflow-y-auto p-6'} print:p-0`}>
-          {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
+          {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory}/>}
           {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
-          {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory}/>}
+          {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory}/>}
           {page==="risk" && <RiskPage holdings={db.holdings} settings={db.settings} group={group}/>}
           {page==="stoploss" && <StopLossPage holdings={db.holdings} settings={db.settings}/>}
           {page==="report" && <TeamReportPage holdings={db.holdings} settings={db.settings} report={db.report} setReport={db.setReport} reportMeta={db.reportMeta} setReportMeta={db.setReportMeta}/>}
-          {page==="settings" && <SettingsPage settings={db.settings} setSettings={db.setSettings} holdings={db.holdings} setHoldings={db.setHoldings} weeklyHistory={db.weeklyHistory} setWeeklyHistory={db.setWeeklyHistory} group={group}/>}
+          {page==="settings" && <SettingsPage settings={db.settings} setSettings={db.setSettings} holdings={db.holdings} setHoldings={db.setHoldings} dailyHistory={db.dailyHistory} setDailyHistory={db.setDailyHistory} weeklyHistory={db.weeklyHistory} setWeeklyHistory={db.setWeeklyHistory} group={group}/>}
           {page==="catalyst" && <CatalystPage holdings={db.holdings}/>}
         </main>
       </div>

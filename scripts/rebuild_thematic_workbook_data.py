@@ -60,6 +60,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Rebuild workbook-backed thematic seed data")
     parser.add_argument("--positions", required=True, help="Path to current positions workbook")
     parser.add_argument("--tracker", required=True, help="Path to entry/exit tracker workbook")
+    parser.add_argument("--balance", required=True, help="Path to portfolio balance workbook")
     parser.add_argument(
         "--output",
         default=str(Path(__file__).resolve().parents[1] / "lib" / "thematicWorkbookData.js"),
@@ -86,6 +87,17 @@ def normalize_ledger_date(value):
     normalized = value.date() if hasattr(value, "date") else value
     while normalized > TRACKER_DATE_CUTOFF:
         normalized = normalized.replace(year=normalized.year - 1)
+    return normalized.isoformat()
+
+
+def normalize_balance_date(value, previous_date=None):
+    if not hasattr(value, "date") and not isinstance(value, date):
+        return None
+    normalized = value.date() if hasattr(value, "date") else value
+    while normalized > TRACKER_DATE_CUTOFF:
+        normalized = normalized.replace(year=normalized.year - 1)
+    while previous_date and normalized < previous_date and (previous_date - normalized).days > 180:
+        normalized = normalized.replace(year=normalized.year + 1)
     return normalized.isoformat()
 
 
@@ -240,10 +252,52 @@ def load_tracker(tracker_path):
     return ledger, filled_by_date
 
 
+def load_balance_tracker(balance_path):
+    wb = load_workbook(balance_path, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    rows = []
+    previous_date = None
+
+    for values in ws.iter_rows(min_row=2, values_only=True):
+        raw_date, total_balance, monthly_return, since_start = values[:4]
+        normalized_date = normalize_balance_date(raw_date, previous_date)
+        if not normalized_date or total_balance is None:
+            continue
+        rows.append(
+            {
+                "date": normalized_date,
+                "portfolioValue": float(total_balance or 0),
+                "monthlyReturn": as_float(monthly_return),
+                "sinceStart": as_float(since_start),
+            }
+        )
+        previous_date = date.fromisoformat(normalized_date)
+
+    return rows
+
+
 def download_spy_history(start_date, end_date):
     history = yf.download("SPY", start=start_date, end=end_date, auto_adjust=False, progress=False)
     close_series = history["Close"]["SPY"] if getattr(history.columns, "nlevels", 1) > 1 else history["Close"]
     return {timestamp.strftime("%Y-%m-%d"): float(value) for timestamp, value in close_series.items() if not math.isnan(float(value))}
+
+
+def date_from_filename(path):
+    match = re.search(r"(\d{2})-(\d{2})-(\d{4})", path.name)
+    if not match:
+        return None
+    month, day, year = map(int, match.groups())
+    return date(year, month, day).isoformat()
+
+
+def nearest_available_date(sorted_dates, target_date):
+    candidates = [row_date for row_date in sorted_dates if row_date <= target_date]
+    return candidates[-1] if candidates else sorted_dates[0]
+
+
+def trading_sessions_back(sorted_dates, target_date, sessions):
+    index = sorted_dates.index(target_date)
+    return sorted_dates[max(0, index - sessions)]
 
 
 def find_metadata(ticker, active_meta, any_meta):
@@ -293,17 +347,22 @@ def match_active_ledger_rows(active_rows, ledger_rows):
         row["matchedLedger"] = matched
 
 
-def build_active_rows(active_rows, active_meta, any_meta, price_rows, snapshot_date, previous_week_date):
+def build_active_rows(active_rows, active_meta, any_meta, price_rows, reference_date, valuation_date, previous_week_date):
     current_shares_by_ticker = defaultdict(float)
     for row in active_rows:
-        current_price = price_rows[snapshot_date].get(row["ticker"])
+        reference_price = price_rows[reference_date].get(row["ticker"])
+        current_price = price_rows[valuation_date].get(row["ticker"])
+        if not reference_price:
+            raise ValueError(f"Missing reference price for {row['ticker']} on {reference_date}")
         if not current_price:
-            raise ValueError(f"Missing snapshot price for {row['ticker']} on {snapshot_date}")
+            raise ValueError(f"Missing valuation price for {row['ticker']} on {valuation_date}")
         previous_price = price_rows[previous_week_date].get(row["ticker"]) or current_price
-        row["currentPrice"] = float(current_price)
-        row["shares"] = row["currentValue"] / row["currentPrice"]
+        row["shares"] = row["currentValue"] / float(reference_price)
         row["costBasis"] = row["currentValue"] - row["pnl"]
-        row["buyPrice"] = row["costBasis"] / row["shares"] if row["shares"] else row["currentPrice"]
+        row["buyPrice"] = row["costBasis"] / row["shares"] if row["shares"] else float(current_price)
+        row["currentPrice"] = float(current_price)
+        row["currentValue"] = row["shares"] * row["currentPrice"]
+        row["pnl"] = row["currentValue"] - row["costBasis"]
         row["weeklyReturn"] = (row["currentPrice"] / previous_price) - 1 if previous_price else 0
         current_shares_by_ticker[row["ticker"]] += row["shares"]
 
@@ -347,18 +406,20 @@ def build_active_rows(active_rows, active_meta, any_meta, price_rows, snapshot_d
     return db_rows, current_shares_by_ticker
 
 
-def build_benchmark_row(active_meta, any_meta, snapshot_date, spy_price, benchmark_value):
+def build_benchmark_row(active_meta, any_meta, reference_date, valuation_date, reference_spy_price, valuation_spy_price, benchmark_value):
     meta = find_metadata("SPY", active_meta, any_meta)
-    shares = benchmark_value / spy_price
+    shares = benchmark_value / reference_spy_price
+    current_value = shares * valuation_spy_price
+    pnl = current_value - benchmark_value
     return [
         "benchmark-spy",
         "SPY",
         meta["company"] or "SPDR S&P 500 ETF Trust",
         "Benchmark",
         meta["subTheme"] or "Benchmark",
-        spy_price,
-        spy_price,
-        snapshot_date,
+        reference_spy_price,
+        valuation_spy_price,
+        reference_date,
         "",
         shares,
         meta["benchmarkWeight"],
@@ -369,8 +430,8 @@ def build_benchmark_row(active_meta, any_meta, snapshot_date, spy_price, benchma
         meta["valueBeta"],
         meta["momentumBeta"],
         0,
-        benchmark_value,
-        0,
+        current_value,
+        pnl,
         0,
         0,
         0,
@@ -445,69 +506,49 @@ def build_scale_map(ledger_rows, current_shares_by_ticker):
     return scale
 
 
-def build_daily_series(ledger_rows, price_rows, spy_rows, scale_by_ticker, cash_value, benchmark_shares):
-    transactions_by_date = defaultdict(lambda: {"buy": 0.0, "sell": 0.0})
-    ledger_by_ticker = defaultdict(list)
-    for row in ledger_rows:
-        ledger_by_ticker[row["ticker"]].append(row)
-        scale = scale_by_ticker.get(row["ticker"], 1.0) if row["remainingQty"] > 1e-8 else 1.0
-        for entry in row["entries"]:
-            if entry["date"]:
-                transactions_by_date[entry["date"]]["buy"] += entry["total"] * scale
-        for exit_row in row["exits"]:
-            if exit_row["date"]:
-                transactions_by_date[exit_row["date"]]["sell"] += exit_row["total"] * scale
-
-    initial_cash = cash_value + sum(flow["buy"] - flow["sell"] for flow in transactions_by_date.values())
-    cash_balance = initial_cash
+def build_daily_history(balance_rows, spy_rows):
+    spy_dates = sorted(spy_rows)
+    latest_spy = spy_rows[spy_dates[0]] if spy_dates else None
+    spy_index = 0
+    previous_portfolio_value = None
+    previous_spy_price = None
+    benchmark_nav = 1.0
     daily_rows = []
-    for row_date in sorted(price_rows):
-        flows = transactions_by_date[row_date]
-        cash_balance -= flows["buy"]
-        cash_balance += flows["sell"]
 
-        stock_value = 0.0
-        for ticker, rows in ledger_by_ticker.items():
-            price = price_rows[row_date].get(ticker)
-            if price is None:
-                continue
-            quantity = 0.0
-            for row in rows:
-                scale = scale_by_ticker.get(ticker, 1.0) if row["remainingQty"] > 1e-8 else 1.0
-                held = 0.0
-                for entry in row["entries"]:
-                    if entry["date"] and entry["date"] <= row_date:
-                        held += entry["qty"] * scale
-                for exit_row in row["exits"]:
-                    if exit_row["date"] and exit_row["date"] <= row_date:
-                        held -= exit_row["qty"] * scale
-                quantity += held
-            stock_value += quantity * price
+    for row in balance_rows:
+        row_date = row["date"]
+        while spy_index < len(spy_dates) and spy_dates[spy_index] <= row_date:
+            latest_spy = spy_rows[spy_dates[spy_index]]
+            spy_index += 1
+        if latest_spy is None:
+            continue
 
-        benchmark_value = benchmark_shares * spy_rows[row_date]
-        total_value = stock_value + benchmark_value + cash_balance
+        portfolio_value = row["portfolioValue"]
+        if previous_portfolio_value is None:
+            portfolio_return = 0
+            benchmark_return = 0
+        else:
+            portfolio_return = portfolio_value / previous_portfolio_value - 1 if previous_portfolio_value else 0
+            benchmark_return = latest_spy / previous_spy_price - 1 if previous_spy_price else 0
+            benchmark_nav *= 1 + benchmark_return
+
         daily_rows.append(
             {
                 "date": row_date,
-                "stockValue": stock_value,
-                "benchmarkValue": benchmark_value,
-                "cashValue": cash_balance,
-                "portfolioValue": total_value,
+                "portfolioValue": portfolio_value,
+                "benchmarkValue": benchmark_nav,
+                "portfolioReturn": portfolio_return,
+                "benchmarkReturn": benchmark_return,
+                "marketContrib": benchmark_return,
+                "valueContrib": 0,
+                "momentumContrib": 0,
+                "alpha": portfolio_return - benchmark_return,
+                "sinceStart": row["sinceStart"],
             }
         )
+        previous_portfolio_value = portfolio_value
+        previous_spy_price = latest_spy
 
-    for index, row in enumerate(daily_rows):
-        if index == 0:
-            row["portfolioReturn"] = 0
-            row["benchmarkReturn"] = 0
-        else:
-            previous = daily_rows[index - 1]
-            row["portfolioReturn"] = (
-                row["portfolioValue"] / previous["portfolioValue"] - 1 if previous["portfolioValue"] else 0
-            )
-            row["benchmarkReturn"] = (
-                row["benchmarkValue"] / previous["benchmarkValue"] - 1 if previous["benchmarkValue"] else 0
-            )
     return daily_rows
 
 
@@ -561,13 +602,14 @@ def sample_std(values):
     return math.sqrt(variance)
 
 
-def build_payload(active_rows, exited_rows, weekly_history, summary):
+def build_payload(active_rows, exited_rows, weekly_history, daily_history, summary):
     return {
         "snapshotDate": summary["snapshotDate"],
         "summary": summary,
         "activeRows": active_rows,
         "exitedRows": exited_rows,
         "weeklyHistory": weekly_history,
+        "dailyHistory": daily_history,
     }
 
 
@@ -591,6 +633,7 @@ def write_module(output_path, payload):
     lines.append("export const THEMATIC_WORKBOOK_ACTIVE_ROWS = THEMATIC_WORKBOOK.activeRows;")
     lines.append("export const THEMATIC_WORKBOOK_EXITED_ROWS = THEMATIC_WORKBOOK.exitedRows;")
     lines.append("export const THEMATIC_WORKBOOK_WEEKLY_HISTORY = THEMATIC_WORKBOOK.weeklyHistory;")
+    lines.append("export const THEMATIC_WORKBOOK_DAILY_HISTORY = THEMATIC_WORKBOOK.dailyHistory;")
     lines.append("")
     output_path.write_text("\n".join(lines) + "\n")
 
@@ -602,12 +645,23 @@ def main():
 
     active_rows, summary_rows = load_positions(Path(args.positions))
     ledger_rows, price_rows = load_tracker(Path(args.tracker))
+    balance_rows = load_balance_tracker(Path(args.balance))
 
-    snapshot_date = "2026-03-24"
-    previous_week_date = "2026-03-17"
-    spy_rows = download_spy_history("2025-11-01", "2026-03-27")
-    if snapshot_date not in spy_rows:
-        raise ValueError(f"Missing SPY close for {snapshot_date}")
+    if not balance_rows:
+        raise ValueError("Balance tracker workbook did not contain any balance rows")
+
+    sorted_price_dates = sorted(price_rows)
+    reference_date = date_from_filename(Path(args.positions)) or sorted_price_dates[-2]
+    reference_date = nearest_available_date(sorted_price_dates, reference_date)
+    valuation_date = nearest_available_date(sorted_price_dates, balance_rows[-1]["date"])
+    previous_week_date = trading_sessions_back(sorted_price_dates, valuation_date, 5)
+
+    spy_start_date = min(balance_rows[0]["date"], reference_date)
+    spy_rows = download_spy_history(spy_start_date, TRACKER_DATE_CUTOFF.isoformat())
+    if reference_date not in spy_rows:
+        raise ValueError(f"Missing SPY close for {reference_date}")
+    if valuation_date not in spy_rows:
+        raise ValueError(f"Missing SPY close for {valuation_date}")
 
     match_active_ledger_rows(active_rows, ledger_rows)
     active_db_rows, current_shares_by_ticker = build_active_rows(
@@ -615,7 +669,8 @@ def main():
         active_meta,
         any_meta,
         price_rows,
-        snapshot_date,
+        reference_date,
+        valuation_date,
         previous_week_date,
     )
     scale_by_ticker = build_scale_map(ledger_rows, current_shares_by_ticker)
@@ -623,39 +678,47 @@ def main():
     benchmark_row, benchmark_shares = build_benchmark_row(
         active_meta,
         any_meta,
-        snapshot_date,
-        spy_rows[snapshot_date],
+        reference_date,
+        valuation_date,
+        spy_rows[reference_date],
+        spy_rows[valuation_date],
         summary_rows["In Benchmark"],
     )
     exited_db_rows = build_exited_rows(ledger_rows, scale_by_ticker, active_meta, any_meta)
 
-    cash_value = summary_rows["Portfolio Value"] - summary_rows["Total Positions"] - summary_rows["In Benchmark"]
-    daily_rows = build_daily_series(ledger_rows, price_rows, spy_rows, scale_by_ticker, cash_value, benchmark_shares)
+    latest_balance = balance_rows[-1]
+    stock_value = sum(row[18] for row in active_db_rows)
+    benchmark_value = benchmark_row[18]
+    cash_value = latest_balance["portfolioValue"] - stock_value - benchmark_value
+    daily_rows = build_daily_history(balance_rows, spy_rows)
     weekly_history = build_weekly_history(daily_rows)
 
     portfolio_returns = [row["portfolioReturn"] for row in weekly_history]
     benchmark_returns = [row["benchmarkReturn"] for row in weekly_history]
     summary = {
-        "snapshotDate": snapshot_date,
-        "stockValue": summary_rows["Total Positions"],
+        "snapshotDate": valuation_date,
+        "referenceDate": reference_date,
+        "stockValue": stock_value,
         "stockPnl": sum(row[19] for row in active_db_rows),
-        "benchmarkValue": summary_rows["In Benchmark"],
+        "benchmarkValue": benchmark_value,
         "cashValue": cash_value,
-        "portfolioValue": summary_rows["Portfolio Value"],
-        "benchmarkCurrentPrice": spy_rows[snapshot_date],
+        "portfolioValue": latest_balance["portfolioValue"],
+        "portfolioStartValue": balance_rows[0]["portfolioValue"],
+        "sinceStart": latest_balance["sinceStart"] if latest_balance["sinceStart"] is not None else 0,
+        "benchmarkCurrentPrice": spy_rows[valuation_date],
         "benchmarkShares": benchmark_shares,
         "portfolioVol": sample_std(portfolio_returns) * math.sqrt(52),
         "benchmarkVol": sample_std(benchmark_returns) * math.sqrt(52),
         "spyWeeklyReturn": weekly_history[-1]["benchmarkReturn"] if weekly_history else 0,
     }
 
-    snapshot_row = next(row for row in daily_rows if row["date"] == snapshot_date)
+    snapshot_row = next(row for row in daily_rows if row["date"] == latest_balance["date"])
     if round(snapshot_row["portfolioValue"], 2) != round(summary["portfolioValue"], 2):
         raise ValueError(
             f"Snapshot total mismatch: expected {summary['portfolioValue']:.2f}, got {snapshot_row['portfolioValue']:.2f}"
         )
 
-    payload = build_payload([benchmark_row, *active_db_rows], exited_db_rows, weekly_history, summary)
+    payload = build_payload([benchmark_row, *active_db_rows], exited_db_rows, weekly_history, daily_rows, summary)
     write_module(Path(args.output), payload)
 
     print(
@@ -670,6 +733,7 @@ def main():
                 "stockPnl": round(summary["stockPnl"], 2),
                 "portfolioVol": round(summary["portfolioVol"], 4),
                 "benchmarkVol": round(summary["benchmarkVol"], 4),
+                "dailyRows": len(payload["dailyHistory"]),
                 "weeklyRows": len(payload["weeklyHistory"]),
             },
             indent=2,
