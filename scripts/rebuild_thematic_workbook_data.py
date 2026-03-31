@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 import argparse
+import ast
 import base64
 import gzip
 import json
 import math
+import operator
 import re
 from collections import defaultdict
 from datetime import date, datetime
@@ -54,6 +56,16 @@ DB_ROW_COLUMNS = [
 ]
 
 TRACKER_DATE_CUTOFF = date(2026, 3, 31)
+SAFE_BINARY_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+}
+SAFE_UNARY_OPERATORS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
 
 
 def parse_args():
@@ -105,11 +117,41 @@ def as_float(value):
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    if isinstance(value, str):
+        stripped = value.strip().replace(",", "")
+        if not stripped:
+            return None
+        if stripped.lower() in {"nan", "inf", "+inf", "-inf"}:
+            return None
+        if stripped.startswith("="):
+            stripped = stripped[1:]
+        try:
+            numeric = float(stripped)
+            return numeric if math.isfinite(numeric) else None
+        except (TypeError, ValueError):
+            try:
+                parsed = ast.parse(stripped, mode="eval")
+                numeric = float(eval_numeric_formula(parsed.body))
+                return numeric if math.isfinite(numeric) else None
+            except (SyntaxError, TypeError, ValueError, ZeroDivisionError):
+                return None
     try:
-        return float(value)
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
     except (TypeError, ValueError):
         return None
+
+
+def eval_numeric_formula(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in SAFE_UNARY_OPERATORS:
+        return SAFE_UNARY_OPERATORS[type(node.op)](eval_numeric_formula(node.operand))
+    if isinstance(node, ast.BinOp) and type(node.op) in SAFE_BINARY_OPERATORS:
+        return SAFE_BINARY_OPERATORS[type(node.op)](eval_numeric_formula(node.left), eval_numeric_formula(node.right))
+    raise ValueError(f"Unsupported formula node: {ast.dump(node)}")
 
 
 def load_existing_seed(seed_path):
@@ -161,7 +203,7 @@ def load_positions(positions_path):
 
 
 def load_tracker(tracker_path):
-    wb = load_workbook(tracker_path, data_only=True)
+    wb = load_workbook(tracker_path, data_only=False)
 
     ledger = []
     ws_ledger = wb["Sheet1"]
@@ -181,13 +223,16 @@ def load_tracker(tracker_path):
             normalized_date = normalize_ledger_date(entry_date)
             if normalized_date:
                 last_slot_dates[base] = normalized_date
-            if quantity or average_cost or total:
+            qty_value = as_float(quantity)
+            cost_value = as_float(average_cost)
+            total_value = as_float(total)
+            if qty_value or cost_value or total_value:
                 entries.append(
                     {
                         "date": normalized_date or last_slot_dates[base],
-                        "qty": float(quantity or 0),
-                        "cost": float(average_cost or 0),
-                        "total": float(total or 0),
+                        "qty": qty_value or 0,
+                        "cost": cost_value or 0,
+                        "total": total_value or 0,
                     }
                 )
 
@@ -197,13 +242,16 @@ def load_tracker(tracker_path):
             normalized_date = normalize_ledger_date(exit_date)
             if normalized_date:
                 last_slot_dates[base] = normalized_date
-            if quantity or average_price or total:
+            qty_value = as_float(quantity)
+            price_value = as_float(average_price)
+            total_value = as_float(total)
+            if qty_value or price_value or total_value:
                 exits.append(
                     {
                         "date": normalized_date or last_slot_dates[base],
-                        "qty": float(quantity or 0),
-                        "price": float(average_price or 0),
-                        "total": float(total or 0),
+                        "qty": qty_value or 0,
+                        "price": price_value or 0,
+                        "total": total_value or 0,
                     }
                 )
 

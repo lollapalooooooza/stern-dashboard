@@ -28,8 +28,6 @@ const calc = {
   trackingError: (pb, bv, iv) => Math.sqrt(Math.pow(pb - 1, 2) * bv * bv + iv * iv),
   dailyVaR95: (v) => (v / Math.sqrt(252)) * 1.645,
   dailyVaR99: (v) => (v / Math.sqrt(252)) * 2.326,
-  weeklyVaR95: (v) => (v / Math.sqrt(252)) * 1.645 * Math.sqrt(5),
-  weeklyVaR99: (v) => (v / Math.sqrt(252)) * 2.326 * Math.sqrt(5),
   complianceStatus: (c, l) => { const r = l !== 0 ? c / l : 0; return r > 1 ? "BREACH" : r > 0.85 ? "WARNING" : "OK"; },
   utilization: (c, l) => (l !== 0 ? c / l : 0),
 };
@@ -63,6 +61,14 @@ const asNumber = (value, fallback = 0) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
+const approxEqual = (left, right, epsilon = 0.005) => Math.abs(asNumber(left) - asNumber(right)) < epsilon;
+const currentLocalDateIso = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 const firstNumber = (...values) => {
   for (const value of values) {
     if (hasMetricValue(value)) return asNumber(value);
@@ -70,8 +76,16 @@ const firstNumber = (...values) => {
   return 0;
 };
 
-const activePositionValue = (holding) => asNumber(holding.shares) * asNumber(holding.currentPrice);
-const activePnlDollar = (holding) => calc.pnlDollar(asNumber(holding.currentPrice), asNumber(holding.buyPrice), asNumber(holding.shares));
+const activePositionValue = (holding) => firstNumber(
+  holding.currentValue,
+  asNumber(holding.shares) * asNumber(holding.currentPrice),
+);
+const activePreviousClosePrice = (holding) => firstNumber(holding.previousClose, holding.currentPrice);
+const activePreviousCloseValue = (holding) => asNumber(holding.shares) * activePreviousClosePrice(holding);
+const activePnlDollar = (holding) => {
+  if (hasMetricValue(holding.pnlFromExcel)) return asNumber(holding.pnlFromExcel);
+  return activePositionValue(holding) - holdingCostBasis(holding);
+};
 const exitedPositionValue = (holding) => firstNumber(
   holding.sellTotal,
   holding.currentValue,
@@ -93,12 +107,23 @@ function applyPricesToHoldings(holdings, prices) {
   if (!prices || Object.keys(prices).length === 0) return holdings;
   return holdings.map((holding) => {
     if (holding.status !== "active") return holding;
-    const nextPrice = prices[holding.ticker];
-    if (nextPrice == null) return holding;
-    const currentPrice = Number(nextPrice);
-    const currentValue = activePositionValue({ ...holding, currentPrice });
-    const pnlFromExcel = activePnlDollar({ ...holding, currentPrice });
-    return { ...holding, currentPrice, currentValue, pnlFromExcel };
+    const quote = prices[holding.ticker];
+    if (quote == null) return holding;
+    const currentPrice = typeof quote === "number" ? Number(quote) : Number(quote.price);
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) return holding;
+    const previousCloseCandidate = typeof quote === "number" ? Number.NaN : Number(quote.previousClose);
+    const previousClose = Number.isFinite(previousCloseCandidate) && previousCloseCandidate > 0
+      ? previousCloseCandidate
+      : (hasMetricValue(holding.previousClose) ? asNumber(holding.previousClose) : undefined);
+    const currentValue = asNumber(holding.shares) * currentPrice;
+    const pnlFromExcel = currentValue - holdingCostBasis(holding);
+    return {
+      ...holding,
+      currentPrice,
+      currentValue,
+      pnlFromExcel,
+      ...(previousClose !== undefined ? { previousClose } : {}),
+    };
   });
 }
 
@@ -209,6 +234,52 @@ function normalizeDailyHistoryRows(rows) {
     }));
 }
 
+function buildLiveDailyHistoryRows(rows, liveSnapshot) {
+  const normalized = normalizeDailyHistoryRows(rows);
+  const liveValue = liveSnapshot && typeof liveSnapshot === "object"
+    ? asNumber(liveSnapshot.portfolioValue, Number.NaN)
+    : asNumber(liveSnapshot, Number.NaN);
+  if (!normalized.length || !Number.isFinite(liveValue)) return normalized;
+
+  const firstRow = normalized[0];
+  const lastTrackedRow = normalized.at(-1);
+  if (approxEqual(lastTrackedRow?.portfolioValue, liveValue)) {
+    return normalized.map((row, index) => (
+      index === normalized.length - 1
+        ? {
+            ...row,
+            sinceStart: firstRow?.portfolioValue > 0 ? row.portfolioValue / firstRow.portfolioValue - 1 : row.sinceStart ?? 0,
+          }
+        : row
+    ));
+  }
+
+  const liveDate = currentLocalDateIso();
+  const sameDate = lastTrackedRow?.date === liveDate;
+  const baseRow = sameDate ? normalized.at(-2) : lastTrackedRow;
+  const fallbackPortfolioReturn = baseRow?.portfolioValue ? liveValue / baseRow.portfolioValue - 1 : 0;
+  const portfolioReturn = Number.isFinite(liveSnapshot?.dailyReturn) ? liveSnapshot.dailyReturn : fallbackPortfolioReturn;
+  const fallbackBenchmarkReturn = sameDate ? asNumber(lastTrackedRow?.benchmarkReturn) : 0;
+  const benchmarkReturn = Number.isFinite(liveSnapshot?.benchmarkReturn) ? liveSnapshot.benchmarkReturn : fallbackBenchmarkReturn;
+  const benchmarkBaseRow = sameDate ? normalized.at(-2) || lastTrackedRow : lastTrackedRow;
+  const benchmarkValue = benchmarkBaseRow?.benchmarkValue
+    ? benchmarkBaseRow.benchmarkValue * (1 + benchmarkReturn)
+    : asNumber(lastTrackedRow?.benchmarkValue);
+  const liveRow = {
+    ...lastTrackedRow,
+    date: sameDate ? lastTrackedRow.date : liveDate,
+    portfolioValue: liveValue,
+    portfolioReturn,
+    benchmarkValue,
+    benchmarkReturn,
+    marketContrib: benchmarkReturn,
+    alpha: portfolioReturn - benchmarkReturn,
+    sinceStart: firstRow?.portfolioValue > 0 ? liveValue / firstRow.portfolioValue - 1 : 0,
+  };
+
+  return sameDate ? [...normalized.slice(0, -1), liveRow] : [...normalized, liveRow];
+}
+
 function addHistoryLabels(rows, view) {
   return rows.map((row) => ({
     ...row,
@@ -264,11 +335,12 @@ function useDatabase(group) {
           });
           const pricePayload = await priceResponse.json();
           if (!priceResponse.ok) throw new Error(pricePayload.error || "Price refresh failed");
+          const liveQuotes = pricePayload.quotes || pricePayload.prices;
           if (pricePayload.count > 0) {
-            nextHoldings = applyPricesToHoldings(nextHoldings, pricePayload.prices);
+            nextHoldings = applyPricesToHoldings(nextHoldings, liveQuotes);
             if (pricePayload.dbUpdated) {
               const fresh = await fetch(`/api/holdings?group=${group}`).then((response) => response.json()).catch(() => ({ holdings: nextHoldings }));
-              nextHoldings = fresh.holdings || nextHoldings;
+              nextHoldings = applyPricesToHoldings(fresh.holdings || nextHoldings, liveQuotes);
             }
             if (!cancelled) setLPU(formatPriceUpdateLabel(pricePayload));
           }
@@ -328,11 +400,12 @@ function useDatabase(group) {
     try {
       const r = await fetch("/api/prices", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ group }) });
       const d = await r.json();
+      const liveQuotes = d.quotes || d.prices;
       if (d.count > 0) {
-        setHL((current) => applyPricesToHoldings(current, d.prices));
+        setHL((current) => applyPricesToHoldings(current, liveQuotes));
         if (d.dbUpdated) {
           const fresh = await fetch(`/api/holdings?group=${group}`).then(r=>r.json());
-          setHL(fresh.holdings || []);
+          setHL(applyPricesToHoldings(fresh.holdings || [], liveQuotes));
         }
         setLPU(formatPriceUpdateLabel(d));
       } else alert("No prices returned. Yahoo may be blocking.");
@@ -425,6 +498,9 @@ function computeHoldings(holdings, settings) {
   const investedVal = active.reduce((s, h) => s + activePositionValue(h), 0);
   const cashBalance = asNumber(settings?.cashBalance);
   const totalVal = investedVal + cashBalance;
+  const hasPreviousCloseSnapshot = active.some((holding) => hasMetricValue(holding.previousClose));
+  const previousInvestedVal = hasPreviousCloseSnapshot ? active.reduce((s, h) => s + activePreviousCloseValue(h), 0) : null;
+  const previousTotalVal = previousInvestedVal != null ? previousInvestedVal + cashBalance : null;
   const activeCostBasis = active.reduce((s, h) => s + holdingCostBasis(h), 0);
   const realizedCostBasis = exited.reduce((s, h) => s + h.costBasis, 0);
   const totalRealizedPnl = exited.reduce((s, h) => s + h.pnlDollar, 0);
@@ -444,9 +520,17 @@ function computeHoldings(holdings, settings) {
   const totalCostBasis = activeCostBasis + realizedCostBasis;
   const totalPnl = totalUnrealizedPnl + totalRealizedPnl;
   const totalReturnPct = totalCostBasis > 0 ? totalPnl / totalCostBasis : 0;
+  const benchmarkHolding = computed.find((holding) => holding.theme === "Benchmark");
+  const benchmarkPreviousValue = benchmarkHolding && hasMetricValue(benchmarkHolding.previousClose)
+    ? activePreviousCloseValue(benchmarkHolding)
+    : null;
+  const liveDailyReturn = previousTotalVal > 0 ? totalVal / previousTotalVal - 1 : null;
+  const liveBenchmarkReturn = benchmarkPreviousValue > 0 ? activePositionValue(benchmarkHolding) / benchmarkPreviousValue - 1 : null;
   return {
     totalVal,
     investedVal,
+    previousInvestedVal,
+    previousTotalVal,
     cashBalance,
     active,
     exited,
@@ -458,6 +542,8 @@ function computeHoldings(holdings, settings) {
     totalCostBasis,
     totalPnl,
     totalReturnPct,
+    liveDailyReturn,
+    liveBenchmarkReturn,
   };
 }
 
@@ -498,8 +584,8 @@ function summarizeActiveBook(computed, cashBalance, totalVal = null) {
   };
 }
 
-function selectReturnHistory(view, weeklyHistory, dailyHistory) {
-  if (view === "daily") return normalizeDailyHistoryRows(dailyHistory).slice(-20);
+function selectReturnHistory(view, weeklyHistory, dailyHistoryRows) {
+  if (view === "daily") return (dailyHistoryRows || []).slice(-20);
   return normalizeWeeklyHistoryRows(weeklyHistory);
 }
 
@@ -508,11 +594,10 @@ function selectReturnHistory(view, weeklyHistory, dailyHistory) {
 // ═══════════════════════════════════════════════════════════════════
 function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
   const [returnView, setReturnView] = useState("weekly");
-  const analysisHistory = useMemo(() => selectReturnHistory(returnView, weeklyHistory, dailyHistory), [dailyHistory, returnView, weeklyHistory]);
-  const normalizedDailyHistory = useMemo(() => normalizeDailyHistoryRows(dailyHistory), [dailyHistory]);
   const {
     totalVal,
     investedVal,
+    previousTotalVal,
     cashBalance,
     computed,
     exited,
@@ -520,19 +605,30 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
     totalUnrealizedPnl,
     activeCostBasis,
     realizedCostBasis,
-    totalCostBasis,
     totalPnl,
     totalReturnPct,
+    liveDailyReturn,
+    liveBenchmarkReturn,
   } = computeHoldings(holdings, settings);
+  const trackedDailyHistory = useMemo(() => normalizeDailyHistoryRows(dailyHistory), [dailyHistory]);
+  const liveDailyHistory = buildLiveDailyHistoryRows(dailyHistory, {
+    portfolioValue: totalVal,
+    dailyReturn: liveDailyReturn,
+    benchmarkReturn: liveBenchmarkReturn,
+  });
+  const analysisHistory = selectReturnHistory(returnView, weeklyHistory, liveDailyHistory);
   const bookSummary = summarizeActiveBook(computed, cashBalance, totalVal);
-  const latestBalance = normalizedDailyHistory.at(-1) || null;
-  const portfolioStartValue = normalizedDailyHistory[0]?.portfolioValue ?? null;
-  const balanceChangeDollar = latestBalance && portfolioStartValue != null
-    ? latestBalance.portfolioValue - portfolioStartValue
-    : null;
-  const balanceChangePct = latestBalance?.sinceStart
-    ?? (portfolioStartValue > 0 && balanceChangeDollar != null ? balanceChangeDollar / portfolioStartValue : null);
-  const liveToTrackerGap = latestBalance ? totalVal - latestBalance.portfolioValue : null;
+  const latestTrackedBalance = trackedDailyHistory.at(-1) || null;
+  const liveLatestBalance = liveDailyHistory.at(-1) || null;
+  const portfolioStartValue = trackedDailyHistory[0]?.portfolioValue ?? liveDailyHistory[0]?.portfolioValue ?? null;
+  const liveTotalReturnDollar = portfolioStartValue != null ? totalVal - portfolioStartValue : totalPnl;
+  const liveTotalReturnPct = portfolioStartValue > 0 ? liveTotalReturnDollar / portfolioStartValue : totalReturnPct;
+  const overviewDailyReturn = liveDailyReturn ?? (liveLatestBalance?.portfolioReturn ?? null);
+  const dailyReturnTrend = overviewDailyReturn == null ? undefined : (overviewDailyReturn >= 0 ? "up" : "down");
+  const dailyReturnColor = overviewDailyReturn == null ? "text-slate-700" : (overviewDailyReturn >= 0 ? "text-emerald-700" : "text-red-600");
+  const liveDailyBaseDate = previousTotalVal == null && liveDailyHistory.length > 1 ? liveDailyHistory.at(-2)?.date : null;
+  const liveDailyBaseValue = previousTotalVal ?? (liveDailyHistory.length > 1 ? liveDailyHistory.at(-2)?.portfolioValue : latestTrackedBalance?.portfolioValue ?? null);
+  const liveToTrackerGap = latestTrackedBalance ? totalVal - latestTrackedBalance.portfolioValue : null;
   const stocksOnly = computed.filter(h => h.theme!=="Benchmark");
   const portBeta = calc.portfolioBeta(computed);
   const sysVol = calc.systematicVol(portBeta, settings.benchmarkVol);
@@ -543,15 +639,14 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
   const pnlSorted = [...stocksOnly].sort((a,b)=>b.pnlDollar-a.pnlDollar);
   const pnlChart = [...pnlSorted.slice(0,5),...pnlSorted.slice(-5)];
   const tickers = stocksOnly.map(h=>h.ticker);
-  const cumReturn = cumData.length ? cumData[cumData.length - 1].portfolio : 0;
 
   return <div className="space-y-6">
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio Value" value={fmt.usd(totalVal)} sub={latestBalance ? `Tracker ${fmt.usd(latestBalance.portfolioValue)}` : undefined} icon={DollarSign} tooltip={`Live holdings + cash: ${fmt.usd(totalVal)}\nStock holdings: ${fmt.usd(bookSummary.stockValue)}\nBenchmark: ${fmt.usd(bookSummary.benchmarkValue)}\nCash: ${fmt.usd(cashBalance)}${latestBalance ? `\nTracker latest: ${fmt.usd(latestBalance.portfolioValue)}\nLive - tracker gap: ${fmt.usd(liveToTrackerGap)}` : ""}`} />
+      <StatCard label="Portfolio Value" value={fmt.usdExact(totalVal)} sub={latestTrackedBalance ? `${fmt.shortDate(latestTrackedBalance.date)} tracker ${fmt.usdExact(latestTrackedBalance.portfolioValue)}` : undefined} icon={DollarSign} tooltip={`Live holdings + cash: ${fmt.usdExact(totalVal)}\nStock holdings: ${fmt.usdExact(bookSummary.stockValue)}\nBenchmark: ${fmt.usdExact(bookSummary.benchmarkValue)}\nCash: ${fmt.usdExact(cashBalance)}${latestTrackedBalance ? `\nTracker latest (${fmt.date(latestTrackedBalance.date)}): ${fmt.usdExact(latestTrackedBalance.portfolioValue)}\nLive - tracker gap: ${fmt.usdExact(liveToTrackerGap)}` : ""}`} />
+      <StatCard label="Daily Return" value={fmt.pct(overviewDailyReturn)} trend={dailyReturnTrend} color={dailyReturnColor} icon={ArrowRightLeft} tooltip={`Live holdings return versus ${previousTotalVal != null ? "previous close" : "latest tracked base"}\nCurrent live value: ${fmt.usdExact(totalVal)}${liveDailyBaseDate ? `\nBase date: ${fmt.date(liveDailyBaseDate)}` : ""}${liveDailyBaseValue != null ? `\nBase value: ${fmt.usdExact(liveDailyBaseValue)}` : ""}`} />
+      <StatCard label="Total Return" value={fmt.usdExact(liveTotalReturnDollar)} sub={fmt.pct(liveTotalReturnPct)} trend={liveTotalReturnDollar >= 0 ? "up" : "down"} color={liveTotalReturnDollar >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Tracker-based return from initial portfolio value\nInitial balance: ${fmt.usdExact(portfolioStartValue)}\nCurrent live portfolio value: ${fmt.usdExact(totalVal)}\nLatest tracked balance: ${fmt.usdExact(latestTrackedBalance?.portfolioValue)}\nCurrent live daily return: ${fmt.pct(overviewDailyReturn)}`} />
       <StatCard label="Unrealized PnL" value={fmt.usd(totalUnrealizedPnl)} sub={fmt.pct(activeCostBasis > 0 ? totalUnrealizedPnl / activeCostBasis : 0)} trend={totalUnrealizedPnl >= 0 ? "up" : "down"} color={totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from active holdings\nCost basis: ${fmt.usd(activeCostBasis)}\nCurrent active value: ${fmt.usd(investedVal)}`} />
       <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(realizedCostBasis > 0 ? totalRealizedPnl / realizedCostBasis : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usd(realizedCostBasis)}\nRealized return on exited capital: ${fmt.pct(realizedCostBasis > 0 ? totalRealizedPnl / realizedCostBasis : 0)}`} />
-      <StatCard label="Total Return" value={fmt.usd(totalPnl)} sub={fmt.pct(totalReturnPct)} trend={totalPnl >= 0 ? "up" : "down"} color={totalPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Holdings-based total return\nUnrealized: ${fmt.usd(totalUnrealizedPnl)}\nRealized: ${fmt.usd(totalRealizedPnl)}\nTotal cost basis: ${fmt.usd(totalCostBasis)}${balanceChangeDollar != null ? `\nBalance-tracker change: ${fmt.usd(balanceChangeDollar)} (${fmt.pct(balanceChangePct)})` : ""}\nCompounded selected-series return: ${fmt.pct(cumReturn)}`} />
-      {balanceChangeDollar != null && <StatCard label="Balance Change" value={fmt.usd(balanceChangeDollar)} sub={balanceChangePct != null ? fmt.pct(balanceChangePct) : undefined} trend={balanceChangeDollar >= 0 ? "up" : "down"} color={balanceChangeDollar >= 0 ? "text-emerald-700" : "text-red-600"} icon={ArrowRightLeft} tooltip={`History-backed balance change\nInitial balance: ${fmt.usd(portfolioStartValue)}\nLatest tracker balance: ${fmt.usd(latestBalance?.portfolioValue)}\nGap vs holdings total return: ${fmt.usd(balanceChangeDollar - totalPnl)}`} />}
       <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × adjusted β_i), where benchmark overlap pulls holding beta toward 1.00"/>
       <StatCard label="Tracking Error" value={fmt.pct(te)} icon={Activity}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
@@ -559,7 +654,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
       <StatCard label="Themes" value={bookSummary.stockThemeCount} icon={BarChart3}/>
       <StatCard label="Ann. Vol" value={fmt.pct(settings.portfolioVol)}/>
       <StatCard label="Systematic Vol" value={fmt.pct(sysVol)}/>
-      <StatCard label="Weekly VaR 95%" value={fmt.pct(calc.weeklyVaR95(settings.portfolioVol))}/>
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Portfolio Allocation</h3>
@@ -594,7 +688,7 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
 // ═══════════════════════════════════════════════════════════════════
 // HOLDINGS — active + exited, exit functionality, save
 // ═══════════════════════════════════════════════════════════════════
-function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefreshPrices }) {
+function HoldingsPage({ holdings, setHoldings, settings, dailyHistory, priceLoading, onRefreshPrices }) {
   const [search,setSearch]=useState("");const [themeFilter,setTF]=useState("All");const [statusFilter,setSF]=useState("all");
   const [sortKey,setSK]=useState("theme");const [sortDir,setSD]=useState(1);const [editingId,setEI]=useState(null);
   const [saveStatus,setSS]=useState(null);
@@ -661,6 +755,9 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
   const stockTotal = bookSummary.stockValue;
   const portfolioTotal = bookSummary.portfolioTotal;
   const sectionTotals = bookSummary.stockThemeTotals;
+  const trackedDailyHistory = useMemo(() => normalizeDailyHistoryRows(dailyHistory), [dailyHistory]);
+  const latestTrackedBalance = trackedDailyHistory.at(-1) || null;
+  const liveToTrackerGap = latestTrackedBalance ? portfolioTotal - latestTrackedBalance.portfolioValue : null;
 
   return <div className="space-y-4">
     <SectionHeader title="Holdings" subtitle={`${activeCount} active · ${exitedCount} exited · Realized: ${fmt.usd(totalRealized)}`}>
@@ -704,22 +801,23 @@ function HoldingsPage({ holdings, setHoldings, settings, priceLoading, onRefresh
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Portfolio Total</p>
-          <p className="mt-1 text-lg font-bold text-slate-800">{fmt.usd(portfolioTotal)}</p>
-          <p className="text-xs text-slate-500">{activeCount} active holdings + {fmt.usd(cashBalance)} cash</p>
+          <p className="mt-1 text-lg font-bold text-slate-800">{fmt.usdExact(portfolioTotal)}</p>
+          <p className="text-xs text-slate-500">{activeCount} active holdings + {fmt.usdExact(cashBalance)} cash</p>
+          {latestTrackedBalance && <p className="mt-1 text-xs text-slate-500">Tracker {fmt.shortDate(latestTrackedBalance.date)}: {fmt.usdExact(latestTrackedBalance.portfolioValue)}{Math.abs(liveToTrackerGap || 0) > 0.005 ? ` · Live gap ${fmt.usdExact(liveToTrackerGap)}` : ""}</p>}
         </div>
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-blue-700">Stock Holdings</p>
-          <p className="mt-1 text-lg font-bold text-blue-900">{fmt.usd(stockTotal)}</p>
+          <p className="mt-1 text-lg font-bold text-blue-900">{fmt.usdExact(stockTotal)}</p>
           <p className="text-xs text-blue-700">{fmt.pct(portfolioTotal > 0 ? stockTotal / portfolioTotal : 0, 1)} of active portfolio</p>
         </div>
         <div className="rounded-lg border border-slate-300 bg-white p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-600">Benchmark (S&amp;P 500)</p>
-          <p className="mt-1 text-lg font-bold text-slate-900">{fmt.usd(benchmarkTotal)}</p>
+          <p className="mt-1 text-lg font-bold text-slate-900">{fmt.usdExact(benchmarkTotal)}</p>
           <p className="text-xs text-slate-500">{fmt.pct(portfolioTotal > 0 ? benchmarkTotal / portfolioTotal : 0, 1)} of active portfolio</p>
         </div>
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Cash</p>
-          <p className="mt-1 text-lg font-bold text-slate-800">{fmt.usd(cashBalance)}</p>
+          <p className="mt-1 text-lg font-bold text-slate-800">{fmt.usdExact(cashBalance)}</p>
           <p className="text-xs text-slate-500">{fmt.pct(portfolioTotal > 0 ? cashBalance / portfolioTotal : 0, 1)} of portfolio</p>
         </div>
       </div>
@@ -802,7 +900,12 @@ function buildWeeklyContributionByGroup(rows, field) {
 
 function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings }) {
   const [returnView, setReturnView] = useState("weekly");
-  const { computed, exited, totalVal } = computeHoldings(holdings, settings);
+  const { computed, exited, totalVal, liveDailyReturn, liveBenchmarkReturn } = computeHoldings(holdings, settings);
+  const liveDailyHistory = buildLiveDailyHistoryRows(dailyHistory, {
+    portfolioValue: totalVal,
+    dailyReturn: liveDailyReturn,
+    benchmarkReturn: liveBenchmarkReturn,
+  });
   const activeStocks = computed.filter((holding) => holding.theme !== "Benchmark");
   const allHoldings = [
     ...computed.map((holding) => ({
@@ -845,7 +948,7 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings }) {
     })
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
 
-  const historyRows = useMemo(() => selectReturnHistory(returnView, weeklyHistory, dailyHistory), [dailyHistory, returnView, weeklyHistory]);
+  const historyRows = selectReturnHistory(returnView, weeklyHistory, liveDailyHistory);
   const chartData = addHistoryLabels(historyRows, returnView).map((row) => ({
     ...row,
     excessReturn: (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0),
@@ -875,7 +978,7 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings }) {
   const tableTitle = returnView === "daily" ? "Daily Return Table" : "Weekly Return Table";
 
   return <div className="space-y-6">
-    <SectionHeader title="Returns" subtitle={`Workbook-backed ${returnView} history, current attribution, and drawdown analysis across ${historyRows.length} ${periodNoun}`}>
+    <SectionHeader title="Returns" subtitle={`${returnView === "daily" ? "Workbook-backed daily history with live holdings refresh overlay" : "Workbook-backed weekly history"}, current attribution, and drawdown analysis across ${historyRows.length} ${periodNoun}`}>
       <div className="flex items-center gap-2">
         <TabButton active={returnView==="weekly"} onClick={()=>setReturnView("weekly")}>Weekly</TabButton>
         <TabButton active={returnView==="daily"} onClick={()=>setReturnView("daily")}>Daily (20D)</TabButton>
@@ -1405,7 +1508,7 @@ export default function App() {
         )}
         <main className={`flex-1 min-h-0 ${page==='catalyst'?'overflow-hidden p-0 bg-[#0f1117]':'overflow-y-auto p-6'} print:p-0`}>
           {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory}/>}
-          {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
+          {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} dailyHistory={db.dailyHistory} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
           {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory}/>}
           {page==="risk" && <RiskPage holdings={db.holdings} settings={db.settings} group={group}/>}
           {page==="stoploss" && <StopLossPage holdings={db.holdings} settings={db.settings}/>}

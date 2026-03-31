@@ -1,13 +1,13 @@
 // app/api/prices/route.js — ULTRA-FAST parallel Yahoo Finance with server cache
 import { getAllHoldings, bulkUpdatePrices } from "@/lib/db";
 
-// In-memory server cache: { prices, timestamp }
-let priceCache = { prices: {}, ts: 0, tickers: [] };
+// In-memory server cache: { quotes, prices, timestamp }
+let priceCache = { quotes: {}, prices: {}, ts: 0, tickers: [] };
 const CACHE_TTL = 45_000; // 45 seconds — fresh enough for dashboard
 
 async function fetchYahoo(tickers) {
-  const prices = {};
-  if (!tickers.length) return prices;
+  const quotes = {};
+  if (!tickers.length) return { quotes, prices: {} };
   const symbols = tickers.join(",");
 
   // RACE: first successful strategy wins immediately (no waiting for slow ones)
@@ -38,20 +38,38 @@ async function fetchYahoo(tickers) {
 
   if (raceResult?.quoteResponse?.result) {
     for (const q of raceResult.quoteResponse.result) {
-      if (q.symbol && q.regularMarketPrice > 0) prices[q.symbol] = q.regularMarketPrice;
+      const price = Number(q.regularMarketPrice);
+      const previousClose = Number(q.regularMarketPreviousClose);
+      if (q.symbol && price > 0) {
+        quotes[q.symbol] = {
+          price,
+          previousClose: previousClose > 0 ? previousClose : price,
+        };
+      }
     }
   }
 
   // Parallel individual chart fallback ONLY for missing (2.5s each, max 10)
-  const missing = tickers.filter(t => !prices[t]);
+  const missing = tickers.filter(t => !quotes[t]);
   if (missing.length > 0 && missing.length <= 10) {
     await Promise.allSettled(missing.map(t =>
       fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}?interval=1d&range=1d`, {
         headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(2500),
-      }).then(r => r.ok ? r.json() : null).then(d => { const p = d?.chart?.result?.[0]?.meta?.regularMarketPrice; if (p > 0) prices[t] = p; }).catch(() => {})
+      }).then(r => r.ok ? r.json() : null).then(d => {
+        const meta = d?.chart?.result?.[0]?.meta;
+        const price = Number(meta?.regularMarketPrice);
+        const previousClose = Number(meta?.previousClose ?? meta?.chartPreviousClose);
+        if (price > 0) {
+          quotes[t] = {
+            price,
+            previousClose: previousClose > 0 ? previousClose : price,
+          };
+        }
+      }).catch(() => {})
     ));
   }
-  return prices;
+  const prices = Object.fromEntries(Object.entries(quotes).map(([symbol, quote]) => [symbol, quote.price]));
+  return { quotes, prices };
 }
 
 export async function POST(request) {
@@ -61,20 +79,21 @@ export async function POST(request) {
     const group = body.group || "thematic";
     const holdings = await getAllHoldings(group);
     const tickers = [...new Set(holdings.filter(h => h.status === "active").map(h => h.ticker))];
-    if (!tickers.length) return Response.json({ prices: {}, count: 0, ms: Date.now() - t0 });
+    if (!tickers.length) return Response.json({ prices: {}, quotes: {}, count: 0, ms: Date.now() - t0 });
 
     // Check server cache — return instantly if fresh
     const tickerKey = tickers.sort().join(",");
     const now = Date.now();
     if (priceCache.ts > 0 && (now - priceCache.ts) < CACHE_TTL && priceCache.tickers.join(",") === tickerKey) {
-      const cached = priceCache.prices;
-      const count = Object.keys(cached).length;
+      const cachedPrices = priceCache.prices;
+      const cachedQuotes = priceCache.quotes;
+      const count = Object.keys(cachedPrices).length;
       // Background refresh if older than 20s
       if ((now - priceCache.ts) > 20_000) {
-        fetchYahoo(tickers).then(freshPrices => {
+        fetchYahoo(tickers).then(({ quotes: freshQuotes, prices: freshPrices }) => {
           const freshCount = Object.keys(freshPrices).length;
           if (freshCount > 0) {
-            priceCache = { prices: freshPrices, ts: Date.now(), tickers: tickers.sort() };
+            priceCache = { quotes: freshQuotes, prices: freshPrices, ts: Date.now(), tickers: tickers.sort() };
             // Async DB update
             const updates = [];
             for (const h of holdings) {
@@ -87,15 +106,15 @@ export async function POST(request) {
           }
         }).catch(() => {});
       }
-      return Response.json({ prices: cached, count, requested: tickers.length, cached: true, ms: Date.now() - t0, updated: new Date(priceCache.ts).toISOString() });
+      return Response.json({ prices: cachedPrices, quotes: cachedQuotes, count, requested: tickers.length, cached: true, ms: Date.now() - t0, updated: new Date(priceCache.ts).toISOString() });
     }
 
-    const prices = await fetchYahoo(tickers);
+    const { quotes, prices } = await fetchYahoo(tickers);
     const count = Object.keys(prices).length;
 
     // Update server cache
     if (count > 0) {
-      priceCache = { prices, ts: Date.now(), tickers: tickers.sort() };
+      priceCache = { quotes, prices, ts: Date.now(), tickers: tickers.sort() };
     }
 
     if (count > 0) {
@@ -109,8 +128,8 @@ export async function POST(request) {
       if (updates.length > 0) await bulkUpdatePrices(updates, group);
     }
 
-    return Response.json({ prices, count, requested: tickers.length, dbUpdated: count > 0, ms: Date.now() - t0, updated: new Date().toISOString() });
-  } catch (e) { return Response.json({ prices: {}, error: e.message, ms: Date.now() - t0 }, { status: 500 }); }
+    return Response.json({ prices, quotes, count, requested: tickers.length, dbUpdated: count > 0, ms: Date.now() - t0, updated: new Date().toISOString() });
+  } catch (e) { return Response.json({ prices: {}, quotes: {}, error: e.message, ms: Date.now() - t0 }, { status: 500 }); }
 }
 
 export async function GET() { return Response.json({ status: "ok" }); }
