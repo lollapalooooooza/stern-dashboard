@@ -75,31 +75,39 @@ const firstNumber = (...values) => {
   }
   return 0;
 };
+const firstPositiveNumber = (...values) => {
+  for (const value of values) {
+    const numeric = asNumber(value, Number.NaN);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  }
+  return 0;
+};
 
-const activePositionValue = (holding) => firstNumber(
+const activePositionValue = (holding) => firstPositiveNumber(
   holding.currentValue,
   asNumber(holding.shares) * asNumber(holding.currentPrice),
 );
 const activePreviousClosePrice = (holding) => firstNumber(holding.previousClose, holding.currentPrice);
 const activePreviousCloseValue = (holding) => asNumber(holding.shares) * activePreviousClosePrice(holding);
-const activePnlDollar = (holding) => {
-  if (hasMetricValue(holding.pnlFromExcel)) return asNumber(holding.pnlFromExcel);
-  return activePositionValue(holding) - holdingCostBasis(holding);
-};
-const exitedPositionValue = (holding) => firstNumber(
+const activePnlDollar = (holding) => activePositionValue(holding) - holdingCostBasis(holding);
+const exitedPositionValue = (holding) => firstPositiveNumber(
   holding.sellTotal,
   holding.currentValue,
   asNumber(holding.shares) * firstNumber(holding.sellPrice, holding.currentPrice),
 );
-const holdingCostBasis = (holding) => firstNumber(holding.costBasis, asNumber(holding.shares) * asNumber(holding.buyPrice));
+const holdingCostBasis = (holding) => firstPositiveNumber(
+  holding.costBasis,
+  asNumber(holding.shares) * asNumber(holding.buyPrice),
+);
 const realizedPnlDollar = (holding) => {
-  if (hasMetricValue(holding.realizedPnl)) return asNumber(holding.realizedPnl);
-  if (hasMetricValue(holding.pnlFromExcel)) return asNumber(holding.pnlFromExcel);
+  if (hasMetricValue(holding.realizedPnl) && !approxEqual(holding.realizedPnl, 0)) return asNumber(holding.realizedPnl);
+  if (firstPositiveNumber(holding.sellTotal) > 0) return exitedPositionValue(holding) - holdingCostBasis(holding);
+  if (hasMetricValue(holding.pnlFromExcel) && !approxEqual(holding.pnlFromExcel, 0)) return asNumber(holding.pnlFromExcel);
   return exitedPositionValue(holding) - holdingCostBasis(holding);
 };
 const realizedPnlPercent = (holding) => {
-  if (hasMetricValue(holding.realizedPnlPct)) return asNumber(holding.realizedPnlPct);
   const costBasis = holdingCostBasis(holding);
+  if (hasMetricValue(holding.realizedPnlPct) && !approxEqual(holding.realizedPnlPct, 0) && costBasis > 0) return asNumber(holding.realizedPnlPct);
   return costBasis > 0 ? realizedPnlDollar(holding) / costBasis : 0;
 };
 
