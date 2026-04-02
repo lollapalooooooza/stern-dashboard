@@ -416,6 +416,77 @@ function useDatabase(group) {
   return { loaded, holdings, settings, dailyHistory, weeklyHistory, report, reportMeta, setHoldings, setSettings, setDailyHistory, setWeeklyHistory, setReport, setReportMeta, priceLoading, lastPriceUpdate, refreshPrices };
 }
 
+function buildRiskHoldingsPayload(holdings) {
+  return holdings
+    .filter((holding) => holding.status === "active" && holding.ticker)
+    .map((holding) => ({
+      id: holding.id,
+      ticker: holding.ticker,
+      theme: holding.theme,
+      subTheme: holding.subTheme,
+      currentPrice: holding.currentPrice,
+      buyPrice: holding.buyPrice,
+      shares: holding.shares,
+      status: holding.status,
+    }));
+}
+
+function buildRiskRequestKey(activeRiskHoldings) {
+  return JSON.stringify(activeRiskHoldings.map((holding) => ([
+    holding.id,
+    holding.ticker,
+    holding.currentPrice,
+    holding.buyPrice,
+    holding.shares,
+    holding.theme,
+    holding.subTheme,
+  ])));
+}
+
+function useRiskAnalytics(group, holdings) {
+  const activeRiskHoldings = useMemo(() => buildRiskHoldingsPayload(holdings), [holdings]);
+  const riskRequestKey = useMemo(() => buildRiskRequestKey(activeRiskHoldings), [activeRiskHoldings]);
+  const [riskData, setRiskData] = useState(null);
+  const [riskError, setRiskError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!activeRiskHoldings.length) {
+      setRiskData(null);
+      setRiskError(null);
+      return () => { cancelled = true; };
+    }
+
+    setRiskError(null);
+    (async () => {
+      try {
+        const response = await fetch("/api/risk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ group, holdings: activeRiskHoldings }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Risk analytics failed");
+        if (!cancelled) {
+          setRiskData({ ...data, requestKey: riskRequestKey });
+          setRiskError(null);
+        }
+      } catch (error) {
+        if (!cancelled) setRiskError(error.message || "Risk analytics failed");
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [group, activeRiskHoldings, riskRequestKey]);
+
+  return {
+    analytics: riskData,
+    error: riskError,
+    isLoading: activeRiskHoldings.length > 0 && !riskData && !riskError,
+    isRefreshing: !!riskData && riskData.requestKey !== riskRequestKey,
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // UI COMPONENTS
 // ═══════════════════════════════════════════════════════════════════
@@ -592,7 +663,7 @@ function selectReturnHistory(view, weeklyHistory, dailyHistoryRows) {
 // ═══════════════════════════════════════════════════════════════════
 // OVERVIEW
 // ═══════════════════════════════════════════════════════════════════
-function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
+function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk }) {
   const [returnView, setReturnView] = useState("weekly");
   const {
     totalVal,
@@ -610,7 +681,8 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
     liveDailyReturn,
     liveBenchmarkReturn,
   } = computeHoldings(holdings, settings);
-  const trackedDailyHistory = useMemo(() => normalizeDailyHistoryRows(dailyHistory), [dailyHistory]);
+  const liveRiskMetrics = risk?.analytics?.metrics || null;
+  const trackedDailyHistory = normalizeDailyHistoryRows(dailyHistory);
   const liveDailyHistory = buildLiveDailyHistoryRows(dailyHistory, {
     portfolioValue: totalVal,
     dailyReturn: liveDailyReturn,
@@ -621,19 +693,28 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
   const latestTrackedBalance = trackedDailyHistory.at(-1) || null;
   const liveLatestBalance = liveDailyHistory.at(-1) || null;
   const portfolioStartValue = trackedDailyHistory[0]?.portfolioValue ?? liveDailyHistory[0]?.portfolioValue ?? null;
-  const liveTotalReturnDollar = portfolioStartValue != null ? totalVal - portfolioStartValue : totalPnl;
-  const liveTotalReturnPct = portfolioStartValue > 0 ? liveTotalReturnDollar / portfolioStartValue : totalReturnPct;
   const overviewDailyReturn = liveDailyReturn ?? (liveLatestBalance?.portfolioReturn ?? null);
   const dailyReturnTrend = overviewDailyReturn == null ? undefined : (overviewDailyReturn >= 0 ? "up" : "down");
   const dailyReturnColor = overviewDailyReturn == null ? "text-slate-700" : (overviewDailyReturn >= 0 ? "text-emerald-700" : "text-red-600");
   const liveDailyBaseDate = previousTotalVal == null && liveDailyHistory.length > 1 ? liveDailyHistory.at(-2)?.date : null;
   const liveDailyBaseValue = previousTotalVal ?? (liveDailyHistory.length > 1 ? liveDailyHistory.at(-2)?.portfolioValue : latestTrackedBalance?.portfolioValue ?? null);
   const liveToTrackerGap = latestTrackedBalance ? totalVal - latestTrackedBalance.portfolioValue : null;
+  const displayPortfolioValue = totalVal;
+  const unrealizedPnlPct = displayPortfolioValue > 0 ? totalUnrealizedPnl / displayPortfolioValue : 0;
+  const realizedPnlPct = displayPortfolioValue > 0 ? totalRealizedPnl / displayPortfolioValue : 0;
+  const displayTotalReturnDollar = totalPnl;
+  const displayTotalReturnPct = displayPortfolioValue > 0 ? totalPnl / displayPortfolioValue : totalReturnPct;
   const stocksOnly = computed.filter(h => h.theme!=="Benchmark");
-  const portBeta = calc.portfolioBeta(computed);
-  const sysVol = calc.systematicVol(portBeta, settings.benchmarkVol);
-  const idioVol = calc.idiosyncraticVol(settings.portfolioVol, sysVol);
-  const te = calc.trackingError(portBeta, settings.benchmarkVol, idioVol);
+  const localPortBeta = calc.portfolioBeta(computed);
+  const localSysVol = calc.systematicVol(localPortBeta, settings.benchmarkVol);
+  const localIdioVol = calc.idiosyncraticVol(settings.portfolioVol, localSysVol);
+  const localTe = calc.trackingError(localPortBeta, settings.benchmarkVol, localIdioVol);
+  const displayBeta = liveRiskMetrics?.portfolioBeta ?? localPortBeta;
+  const displayTrackingError = liveRiskMetrics?.trackingError ?? localTe;
+  const displayDailyVaR95 = liveRiskMetrics?.dailyVaR95 ?? calc.dailyVaR95(settings.portfolioVol);
+  const displayAnnualizedVol = liveRiskMetrics?.annualizedVol ?? settings.portfolioVol;
+  const displaySystematicVol = liveRiskMetrics?.systematicVol ?? localSysVol;
+  const betaStatus = risk?.isLoading ? "Loading live regression..." : risk?.isRefreshing ? "Refreshing live regression..." : liveRiskMetrics ? `${liveRiskMetrics.observations}d live regression` : risk?.error ? "Risk analytics unavailable" : "Holdings-weighted fallback";
   const allocationLegend = [...bookSummary.portfolioAllocation].sort((a,b)=>b.value-a.value);
   const cumData = buildCumulativeReturnSeries(analysisHistory).map((row, index) => ({ ...row, label: returnView === "daily" ? fmt.shortDate(analysisHistory[index]?.date) : analysisHistory[index]?.week }));
   const pnlSorted = [...stocksOnly].sort((a,b)=>b.pnlDollar-a.pnlDollar);
@@ -644,16 +725,16 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory }) {
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
       <StatCard label="Portfolio Value" value={fmt.usdExact(totalVal)} sub={latestTrackedBalance ? `${fmt.shortDate(latestTrackedBalance.date)} tracker ${fmt.usdExact(latestTrackedBalance.portfolioValue)}` : undefined} icon={DollarSign} tooltip={`Live holdings + cash: ${fmt.usdExact(totalVal)}\nStock holdings: ${fmt.usdExact(bookSummary.stockValue)}\nBenchmark: ${fmt.usdExact(bookSummary.benchmarkValue)}\nCash: ${fmt.usdExact(cashBalance)}${latestTrackedBalance ? `\nTracker latest (${fmt.date(latestTrackedBalance.date)}): ${fmt.usdExact(latestTrackedBalance.portfolioValue)}\nLive - tracker gap: ${fmt.usdExact(liveToTrackerGap)}` : ""}`} />
       <StatCard label="Daily Return" value={fmt.pct(overviewDailyReturn)} trend={dailyReturnTrend} color={dailyReturnColor} icon={ArrowRightLeft} tooltip={`Live holdings return versus ${previousTotalVal != null ? "previous close" : "latest tracked base"}\nCurrent live value: ${fmt.usdExact(totalVal)}${liveDailyBaseDate ? `\nBase date: ${fmt.date(liveDailyBaseDate)}` : ""}${liveDailyBaseValue != null ? `\nBase value: ${fmt.usdExact(liveDailyBaseValue)}` : ""}`} />
-      <StatCard label="Total Return" value={fmt.usdExact(liveTotalReturnDollar)} sub={fmt.pct(liveTotalReturnPct)} trend={liveTotalReturnDollar >= 0 ? "up" : "down"} color={liveTotalReturnDollar >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Tracker-based return from initial portfolio value\nInitial balance: ${fmt.usdExact(portfolioStartValue)}\nCurrent live portfolio value: ${fmt.usdExact(totalVal)}\nLatest tracked balance: ${fmt.usdExact(latestTrackedBalance?.portfolioValue)}\nCurrent live daily return: ${fmt.pct(overviewDailyReturn)}`} />
-      <StatCard label="Unrealized PnL" value={fmt.usd(totalUnrealizedPnl)} sub={fmt.pct(activeCostBasis > 0 ? totalUnrealizedPnl / activeCostBasis : 0)} trend={totalUnrealizedPnl >= 0 ? "up" : "down"} color={totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from active holdings\nCost basis: ${fmt.usd(activeCostBasis)}\nCurrent active value: ${fmt.usd(investedVal)}`} />
-      <StatCard label="Realized PnL" value={fmt.usd(totalRealizedPnl)} sub={fmt.pct(realizedCostBasis > 0 ? totalRealizedPnl / realizedCostBasis : 0)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usd(realizedCostBasis)}\nRealized return on exited capital: ${fmt.pct(realizedCostBasis > 0 ? totalRealizedPnl / realizedCostBasis : 0)}`} />
-      <StatCard label="Portfolio Beta" value={fmt.num(portBeta)} icon={Shield} tooltip="β_p = Σ(w_i × adjusted β_i), where benchmark overlap pulls holding beta toward 1.00"/>
-      <StatCard label="Tracking Error" value={fmt.pct(te)} icon={Activity}/>
-      <StatCard label="Daily VaR 95%" value={fmt.pct(calc.dailyVaR95(settings.portfolioVol))} icon={AlertTriangle}/>
+      <StatCard label="Total Return" value={fmt.usdExact(displayTotalReturnDollar)} sub={fmt.pct(displayTotalReturnPct)} trend={displayTotalReturnDollar >= 0 ? "up" : "down"} color={displayTotalReturnDollar >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Realized + unrealized PnL: ${fmt.usdExact(totalPnl)}\nMeasured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}${portfolioStartValue != null ? `\nInitial tracked balance: ${fmt.usdExact(portfolioStartValue)}` : ""}${latestTrackedBalance ? `\nLatest tracked balance: ${fmt.usdExact(latestTrackedBalance.portfolioValue)}` : ""}`} />
+      <StatCard label="Unrealized PnL" value={fmt.usdExact(totalUnrealizedPnl)} sub={fmt.pct(unrealizedPnlPct)} trend={totalUnrealizedPnl >= 0 ? "up" : "down"} color={totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from active holdings\nCost basis: ${fmt.usdExact(activeCostBasis)}\nCurrent active value: ${fmt.usdExact(investedVal)}\nPercent is measured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}`} />
+      <StatCard label="Realized PnL" value={fmt.usdExact(totalRealizedPnl)} sub={fmt.pct(realizedPnlPct)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usdExact(realizedCostBasis)}\nPercent is measured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}`} />
+      <StatCard label="Portfolio Beta" value={fmt.num(displayBeta)} sub={betaStatus} icon={Shield} tooltip={liveRiskMetrics ? `Live regression beta versus SPY using Yahoo daily history.\nObservations: ${liveRiskMetrics.observations}` : "Fallback to holdings-weighted beta because live regression is not available."}/>
+      <StatCard label="Tracking Error" value={fmt.pct(displayTrackingError)} icon={Activity}/>
+      <StatCard label="Daily VaR 95%" value={fmt.pct(displayDailyVaR95)} icon={AlertTriangle}/>
       <StatCard label="Active" value={computed.length} icon={Briefcase} sub={`${exited.length} exited`}/>
       <StatCard label="Themes" value={bookSummary.stockThemeCount} icon={BarChart3}/>
-      <StatCard label="Ann. Vol" value={fmt.pct(settings.portfolioVol)}/>
-      <StatCard label="Systematic Vol" value={fmt.pct(sysVol)}/>
+      <StatCard label="Ann. Vol" value={fmt.pct(displayAnnualizedVol)}/>
+      <StatCard label="Systematic Vol" value={fmt.pct(displaySystematicVol)}/>
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Portfolio Allocation</h3>
@@ -1191,57 +1272,12 @@ function buildSubThemeRiskAttribution(computed, lastWeek) {
     .sort((a, b) => Math.abs(b.predictedContribution) - Math.abs(a.predictedContribution));
 }
 
-function RiskPage({ holdings, settings, group }) {
-  const activeRiskHoldings = useMemo(() => holdings
-    .filter((holding) => holding.status === "active" && holding.ticker)
-    .map((holding) => ({
-      id: holding.id,
-      ticker: holding.ticker,
-      theme: holding.theme,
-      subTheme: holding.subTheme,
-      currentPrice: holding.currentPrice,
-      buyPrice: holding.buyPrice,
-      shares: holding.shares,
-      status: holding.status,
-    })), [holdings]);
-  const riskRequestKey = useMemo(() => JSON.stringify(activeRiskHoldings.map((holding) => [
-    holding.id,
-    holding.ticker,
-    holding.currentPrice,
-    holding.buyPrice,
-    holding.shares,
-    holding.theme,
-    holding.subTheme,
-  ])), [activeRiskHoldings]);
-  const [riskData, setRiskData] = useState(null);
-  const [riskError, setRiskError] = useState(null);
+function RiskPage({ settings, risk }) {
   const [showWeighted, setShowWeighted] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const response = await fetch("/api/risk", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ group, holdings: activeRiskHoldings }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Risk analytics failed");
-        if (!cancelled) {
-          setRiskData({ ...data, requestKey: riskRequestKey });
-          setRiskError(null);
-        }
-      } catch (error) {
-        if (!cancelled) setRiskError(error.message || "Risk analytics failed");
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [group, activeRiskHoldings, riskRequestKey]);
-
-  const analytics = riskData;
-  const isLoading = !analytics && !riskError;
-  const isRefreshing = !!analytics && analytics.requestKey !== riskRequestKey;
+  const analytics = risk.analytics;
+  const riskError = risk.error;
+  const isLoading = risk.isLoading;
+  const isRefreshing = risk.isRefreshing;
   const metrics = analytics?.metrics;
   const themeRisk = (analytics?.themeRisk || []).map((row, index) => ({ ...row, fill: getThemeColor(row.theme, index) }));
   const subThemeRisk = analytics?.subThemeRisk || [];
@@ -1473,6 +1509,7 @@ export default function App() {
   const [page, setPage] = useState("overview");
   const [sidebarOpen, setSO] = useState(true);
   const db = useDatabase(group);
+  const risk = useRiskAnalytics(group, db.loaded ? db.holdings : []);
 
   if (!db.loaded) return <div className="flex items-center justify-center h-screen bg-slate-50"><div className="text-center"><div className="w-8 h-8 border-2 border-slate-300 border-t-slate-700 rounded-full animate-spin mx-auto mb-3"/><p className="text-sm text-slate-500">Loading {GROUP_LABELS[group]}...</p>{db.priceLoading && <p className="text-xs text-blue-500 mt-1">Fetching prices...</p>}</div></div>;
 
@@ -1507,10 +1544,10 @@ export default function App() {
         </header>
         )}
         <main className={`flex-1 min-h-0 ${page==='catalyst'?'overflow-hidden p-0 bg-[#0f1117]':'overflow-y-auto p-6'} print:p-0`}>
-          {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory}/>}
+          {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory} risk={risk}/>}
           {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} dailyHistory={db.dailyHistory} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
           {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory}/>}
-          {page==="risk" && <RiskPage holdings={db.holdings} settings={db.settings} group={group}/>}
+          {page==="risk" && <RiskPage settings={db.settings} risk={risk}/>}
           {page==="stoploss" && <StopLossPage holdings={db.holdings} settings={db.settings}/>}
           {page==="report" && <TeamReportPage holdings={db.holdings} settings={db.settings} report={db.report} setReport={db.setReport} reportMeta={db.reportMeta} setReportMeta={db.setReportMeta}/>}
           {page==="settings" && <SettingsPage settings={db.settings} setSettings={db.setSettings} holdings={db.holdings} setHoldings={db.setHoldings} dailyHistory={db.dailyHistory} setDailyHistory={db.setDailyHistory} weeklyHistory={db.weeklyHistory} setWeeklyHistory={db.setWeeklyHistory} group={group}/>}
