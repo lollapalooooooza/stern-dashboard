@@ -563,6 +563,8 @@ const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-70
   const [hoverOpen, setHoverOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [copiedState, setCopiedState] = useState("");
+  const [detailSide, setDetailSide] = useState("right");
+  const cardRef = useRef(null);
   const openTimerRef = useRef(null);
   const closeTimerRef = useRef(null);
   const copiedTimerRef = useRef(null);
@@ -584,6 +586,19 @@ const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-70
     clearHoverTimers();
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    if (!showDetail || !cardRef.current || typeof window === "undefined") return undefined;
+    const updatePlacement = () => {
+      const rect = cardRef.current.getBoundingClientRect();
+      const panelWidth = Math.min(480, window.innerWidth - 32);
+      const overflowsRight = rect.left + panelWidth > window.innerWidth - 16;
+      setDetailSide(overflowsRight ? "left" : "right");
+    };
+    updatePlacement();
+    window.addEventListener("resize", updatePlacement);
+    return () => window.removeEventListener("resize", updatePlacement);
+  }, [showDetail]);
 
   const openDetail = () => {
     if (!hasDetail) return;
@@ -640,16 +655,23 @@ const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-70
   };
 
   return (<>
-    <div className="relative" onMouseEnter={openDetail} onMouseLeave={closeDetail}>
-    <Card className={`p-4 hover:shadow-md transition-shadow ${(tooltip||editable||hasDetail)?"cursor-pointer":""}`} onClick={handleCardClick}>
-      <div className="flex items-start justify-between"><div className="min-w-0">
-        <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-1">{label}</p>
-        <p className={`text-lg font-bold ${color}`}>{value}</p>
-        {sub && <p className={`text-xs mt-0.5 ${trend==="up"?"text-emerald-600":trend==="down"?"text-red-500":"text-slate-500"}`}>{sub}</p>}
-        {hasDetail && <p className="mt-2 text-[10px] font-medium text-slate-400">Hover or click for formula</p>}
-      </div>{Icon && <div className="p-2 bg-slate-50 rounded-lg"><Icon size={16} className="text-slate-400" /></div>}</div>
+    <div ref={cardRef} className="relative h-full" onMouseEnter={openDetail} onMouseLeave={closeDetail}>
+    <Card className={`h-full p-4 hover:shadow-md transition-shadow ${(tooltip||editable||hasDetail)?"cursor-pointer":""} ${hasDetail ? "min-h-[8.75rem]" : "min-h-[7.5rem]"}`} onClick={handleCardClick}>
+      <div className="flex h-full flex-col justify-between">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">{label}</p>
+            <p className={`text-lg font-bold ${color}`}>{value}</p>
+            <p className={`mt-0.5 min-h-[2rem] text-xs ${trend==="up"?"text-emerald-600":trend==="down"?"text-red-500":"text-slate-500"}`}>{sub || " "}</p>
+          </div>
+          {Icon && <div className="rounded-lg bg-slate-50 p-2"><Icon size={16} className="text-slate-400" /></div>}
+        </div>
+        <div className="min-h-[1rem] pt-2">
+          {hasDetail ? <p className="text-[10px] font-medium text-slate-400">Hover or click for formula</p> : null}
+        </div>
+      </div>
     </Card>
-    {showDetail && <div className="absolute left-0 top-full z-[90] mt-2 w-[min(30rem,calc(100vw-2rem))]" onMouseEnter={openDetail} onMouseLeave={closeDetail}>
+    {showDetail && <div className={`absolute top-full z-[90] mt-2 w-[min(30rem,calc(100vw-2rem))] ${detailSide === "left" ? "right-0" : "left-0"}`} onMouseEnter={openDetail} onMouseLeave={closeDetail}>
       <div className="rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
         <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3">
           <div className="flex items-start justify-between gap-3">
