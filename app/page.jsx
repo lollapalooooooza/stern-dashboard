@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import dynamic from 'next/dynamic';
-import { buildHoldingsFromFidelityCsv } from "@/lib/fidelityCsv";
+import { buildHoldingsFromFidelityFile } from "@/lib/fidelityCsv";
 const CatalystPage = dynamic(() => import('./catalyst/CatalystPage'), { ssr: false });
 const CommentPanel = dynamic(() => import('./components/CommentPanel'), { ssr: false });
 import {
@@ -656,13 +656,13 @@ const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-70
 
   return (<>
     <div ref={cardRef} className="relative h-full" onMouseEnter={openDetail} onMouseLeave={closeDetail}>
-    <Card className={`h-full p-4 hover:shadow-md transition-shadow ${(tooltip||editable||hasDetail)?"cursor-pointer":""} ${hasDetail ? "min-h-[8.75rem]" : "min-h-[7.5rem]"}`} onClick={handleCardClick}>
+    <Card className={`h-full p-4 hover:shadow-md transition-shadow ${(tooltip||editable||hasDetail)?"cursor-pointer":""} ${hasDetail ? "min-h-[7.75rem]" : "min-h-[7rem]"}`} onClick={handleCardClick}>
       <div className="flex h-full flex-col justify-between">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">{label}</p>
             <p className={`text-lg font-bold ${color}`}>{value}</p>
-            <p className={`mt-0.5 min-h-[2rem] text-xs ${trend==="up"?"text-emerald-600":trend==="down"?"text-red-500":"text-slate-500"}`}>{sub || " "}</p>
+            <p className={`mt-0.5 min-h-[1.5rem] text-xs ${trend==="up"?"text-emerald-600":trend==="down"?"text-red-500":"text-slate-500"}`}>{sub || " "}</p>
           </div>
           {Icon && <div className="rounded-lg bg-slate-50 p-2"><Icon size={16} className="text-slate-400" /></div>}
         </div>
@@ -1425,7 +1425,7 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk })
 
   return <div className="space-y-6">
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio Value" value={fmt.usdExact(totalVal)} sub={latestTrackedBalance ? `${fmt.shortDate(latestTrackedBalance.date)} tracker ${fmt.usdExact(latestTrackedBalance.portfolioValue)}` : undefined} icon={DollarSign} tooltip={`Live holdings + cash: ${fmt.usdExact(totalVal)}\nStock holdings: ${fmt.usdExact(bookSummary.stockValue)}\nBenchmark: ${fmt.usdExact(bookSummary.benchmarkValue)}\nCash: ${fmt.usdExact(cashBalance)}${latestTrackedBalance ? `\nTracker latest (${fmt.date(latestTrackedBalance.date)}): ${fmt.usdExact(latestTrackedBalance.portfolioValue)}\nLive - tracker gap: ${fmt.usdExact(liveToTrackerGap)}` : ""}`} detail={overviewDetails.portfolioValue} />
+      <StatCard label="Portfolio Value" value={fmt.usdExact(totalVal)} icon={DollarSign} tooltip={`Live holdings + cash: ${fmt.usdExact(totalVal)}\nStock holdings: ${fmt.usdExact(bookSummary.stockValue)}\nBenchmark: ${fmt.usdExact(bookSummary.benchmarkValue)}\nCash: ${fmt.usdExact(cashBalance)}${latestTrackedBalance ? `\nTracker latest (${fmt.date(latestTrackedBalance.date)}): ${fmt.usdExact(latestTrackedBalance.portfolioValue)}\nLive - tracker gap: ${fmt.usdExact(liveToTrackerGap)}` : ""}`} detail={overviewDetails.portfolioValue} />
       <StatCard label="Daily Return" value={fmt.pct(overviewDailyReturn)} trend={dailyReturnTrend} color={dailyReturnColor} icon={ArrowRightLeft} tooltip={`Live holdings return versus ${previousTotalVal != null ? "previous close" : "latest tracked base"}\nCurrent live value: ${fmt.usdExact(totalVal)}${liveDailyBaseDate ? `\nBase date: ${fmt.date(liveDailyBaseDate)}` : ""}${liveDailyBaseValue != null ? `\nBase value: ${fmt.usdExact(liveDailyBaseValue)}` : ""}`} detail={overviewDetails.dailyReturn} />
       <StatCard label="Total Return" value={fmt.usdExact(displayTotalReturnDollar)} sub={fmt.pct(displayTotalReturnPct)} trend={displayTotalReturnDollar >= 0 ? "up" : "down"} color={displayTotalReturnDollar >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Realized + unrealized PnL: ${fmt.usdExact(totalPnl)}\nMeasured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}${portfolioStartValue != null ? `\nInitial tracked balance: ${fmt.usdExact(portfolioStartValue)}` : ""}${latestTrackedBalance ? `\nLatest tracked balance: ${fmt.usdExact(latestTrackedBalance.portfolioValue)}` : ""}`} detail={overviewDetails.totalReturn} />
       <StatCard label="Unrealized PnL" value={fmt.usdExact(totalUnrealizedPnl)} sub={fmt.pct(unrealizedPnlPct)} trend={totalUnrealizedPnl >= 0 ? "up" : "down"} color={totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from active holdings\nCost basis: ${fmt.usdExact(activeCostBasis)}\nCurrent active value: ${fmt.usdExact(investedVal)}\nPercent is measured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}`} detail={overviewDetails.unrealizedPnl} />
@@ -1543,13 +1543,12 @@ function HoldingsPage({ holdings, setHoldings, settings, setSettings, dailyHisto
   const trackedDailyHistory = useMemo(() => normalizeDailyHistoryRows(dailyHistory), [dailyHistory]);
   const latestTrackedBalance = trackedDailyHistory.at(-1) || null;
   const liveToTrackerGap = latestTrackedBalance ? portfolioTotal - latestTrackedBalance.portfolioValue : null;
-  const importFidelityCsv = async (event) => {
+  const importFidelityFile = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
     setImportStatus({ type: "loading", message: `Importing ${file.name}...` });
     try {
-      const text = await file.text();
-      const result = buildHoldingsFromFidelityCsv(text, holdings, { importDate: currentLocalDateIso() });
+      const result = await buildHoldingsFromFidelityFile(file, holdings, { importDate: currentLocalDateIso() });
       await setHoldings(result.holdings);
       if (result.cashBalance != null && Math.abs(result.cashBalance - Number(settings.cashBalance || 0)) > 0.005) {
         await setSettings({ ...settings, cashBalance: result.cashBalance });
@@ -1559,7 +1558,7 @@ function HoldingsPage({ holdings, setHoldings, settings, setSettings, dailyHisto
         message: `Imported ${result.summary.activeCount} active positions, auto-exited ${result.summary.autoExitedCount}, and set cash to ${result.cashBalance != null ? fmt.usdExact(result.cashBalance) : fmt.usdExact(settings.cashBalance)}.`,
       });
     } catch (error) {
-      setImportStatus({ type: "error", message: error?.message || "Fidelity CSV import failed." });
+      setImportStatus({ type: "error", message: error?.message || "Fidelity file import failed." });
     } finally {
       event.target.value = "";
     }
@@ -1571,8 +1570,8 @@ function HoldingsPage({ holdings, setHoldings, settings, setSettings, dailyHisto
         <div className="relative"><Search size={14} className="absolute left-2 top-2 text-slate-400"/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." className="pl-7 pr-3 py-1.5 text-sm border rounded-md w-32"/></div>
         <select value={themeFilter} onChange={e=>setTF(e.target.value)} className="px-2 py-1.5 text-sm border rounded-md">{themes.map(t=><option key={t}>{t}</option>)}</select>
         <div className="flex rounded-md border border-slate-200 overflow-hidden">{["all","active","exited"].map(s=><button key={s} onClick={()=>setSF(s)} className={`px-2.5 py-1.5 text-xs font-medium ${statusFilter===s?"bg-slate-800 text-white":"text-slate-600 hover:bg-slate-50"}`}>{s==="all"?"All":s==="active"?"Active":"Exited"}</button>)}</div>
-        <input ref={fidelityInputRef} type="file" accept=".csv,text/csv" onChange={importFidelityCsv} className="hidden" />
-        <button onClick={()=>fidelityInputRef.current?.click()} className="flex items-center gap-1 px-3 py-1.5 text-sm border border-emerald-200 text-emerald-700 rounded-md hover:bg-emerald-50"><Upload size={14}/> Fidelity CSV</button>
+        <input ref={fidelityInputRef} type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" onChange={importFidelityFile} className="hidden" />
+        <button onClick={()=>fidelityInputRef.current?.click()} className="flex items-center gap-1 px-3 py-1.5 text-sm border border-emerald-200 text-emerald-700 rounded-md hover:bg-emerald-50"><Upload size={14}/> Fidelity CSV / XLSX</button>
         <button onClick={onRefreshPrices} disabled={priceLoading} className="flex items-center gap-1 px-3 py-1.5 text-sm border border-blue-200 text-blue-700 rounded-md hover:bg-blue-50 disabled:opacity-50">{priceLoading?<Loader2 size={14} className="animate-spin"/>:<RefreshCw size={14}/>} Prices</button>
         <button onClick={addH} className="flex items-center gap-1 px-3 py-1.5 text-sm border text-slate-700 rounded-md hover:bg-slate-50"><Plus size={14}/> Add</button>
         <button onClick={handleSave} className={`flex items-center gap-1 px-3 py-1.5 text-sm rounded-md font-medium ${saveStatus==="saved"?"bg-emerald-600 text-white":"bg-slate-800 text-white hover:bg-slate-700"}`}>{saveStatus==="saving"?<Loader2 size={14} className="animate-spin"/>:saveStatus==="saved"?<Check size={14}/>:<Save size={14}/>} {saveStatus==="saved"?"Saved!":"Save"}</button>
