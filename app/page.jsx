@@ -1722,7 +1722,124 @@ function buildWeeklyContributionByGroup(rows, field) {
   return Object.values(grouped).sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
 }
 
-function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings }) {
+const ATTRIBUTION_SHEET_FACTORS = [
+  { key: "market", label: "S&P 500", betaKey: "portfolioBeta", returnKey: "marketFactorReturn" },
+  { key: "value", label: "Value", betaKey: "valueBeta", returnKey: "valueFactorReturn" },
+  { key: "momentum", label: "Momentum", betaKey: "momentumBeta", returnKey: "momentumFactorReturn" },
+];
+
+function buildAttributionSheetModel(returnView, analytics) {
+  const metrics = analytics?.metrics;
+  const period = returnView === "daily" ? analytics?.latestDay : analytics?.latestWeek;
+  if (!metrics || !period) return null;
+
+  const totalReturn = asNumber(returnView === "daily" ? period.portfolioReturn : firstNumber(period.compoundedPortfolioReturn, period.portfolioReturn), Number.NaN);
+  const benchmarkReturn = asNumber(returnView === "daily" ? period.benchmarkReturn : firstNumber(period.compoundedBenchmarkReturn, period.benchmarkReturn), Number.NaN);
+  if (!Number.isFinite(totalReturn) || !Number.isFinite(benchmarkReturn)) return null;
+
+  const factors = ATTRIBUTION_SHEET_FACTORS.map((factor) => {
+    const beta = asNumber(metrics[factor.betaKey], Number.NaN);
+    const factorReturn = asNumber(period[factor.returnKey], Number.NaN);
+    const absoluteContribution = Number.isFinite(beta) && Number.isFinite(factorReturn) ? beta * factorReturn : null;
+    const excessBeta = factor.key === "market" && Number.isFinite(beta) ? beta - 1 : beta;
+    const excessContribution = Number.isFinite(excessBeta) && Number.isFinite(factorReturn) ? excessBeta * factorReturn : null;
+    return {
+      ...factor,
+      beta: Number.isFinite(beta) ? beta : null,
+      factorReturn: Number.isFinite(factorReturn) ? factorReturn : null,
+      absoluteContribution,
+      excessBeta: Number.isFinite(excessBeta) ? excessBeta : null,
+      excessContribution,
+    };
+  });
+
+  const absoluteImputedReturn = factors.reduce((sum, factor) => sum + (factor.absoluteContribution || 0), 0);
+  const excessTotalReturn = totalReturn - benchmarkReturn;
+  const excessImputedReturn = factors.reduce((sum, factor) => sum + (factor.excessContribution || 0), 0);
+  const residualFromLiveModel = asNumber(period.alphaContrib) + asNumber(period.residualGap);
+
+  const absoluteFormula = factors
+    .filter((factor) => factor.absoluteContribution != null)
+    .map((factor) => `${factor.label}: ${fmt.num(factor.beta, 2)} × ${fmt.pct(factor.factorReturn)} = ${fmt.pct(factor.absoluteContribution)}`);
+  const excessFormula = factors
+    .filter((factor) => factor.excessContribution != null)
+    .map((factor) => `${factor.label}: ${fmt.num(factor.excessBeta, 2)} × ${fmt.pct(factor.factorReturn)} = ${fmt.pct(factor.excessContribution)}`);
+
+  return {
+    periodLabel: returnView === "daily" ? fmt.date(period.date) : `${period.week} · ${fmt.date(period.date)}`,
+    periodKind: returnView === "daily" ? "daily" : "weekly",
+    modelNote: "The uploaded sheet uses S&P 500 / Value / Momentum / Growth. The live dashboard currently models S&P 500 / Value / Momentum, so the workbook-style tables below follow the same formulas with the live factors currently available.",
+    factors,
+    absolute: {
+      totalReturn,
+      imputedReturn: absoluteImputedReturn,
+      idiosyncraticReturn: totalReturn - absoluteImputedReturn,
+      formulaLines: absoluteFormula,
+    },
+    excess: {
+      totalReturn: excessTotalReturn,
+      benchmarkReturn,
+      imputedReturn: excessImputedReturn,
+      idiosyncraticReturn: excessTotalReturn - excessImputedReturn,
+      formulaLines: excessFormula,
+    },
+    residualFromLiveModel,
+  };
+}
+
+function AttributionSheetTable({ title, periodLabel, totalLabel, betaLabel, sheet, factors, accentClass = "bg-amber-50" }) {
+  return <Card className="p-4">
+    <div className="mb-3">
+      <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
+      <p className="text-xs text-slate-500">{periodLabel}</p>
+    </div>
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b bg-slate-50">
+            <th className="py-2 px-2 text-left font-semibold uppercase tracking-wider text-slate-500">Line Item</th>
+            <th className="py-2 px-2 text-left font-semibold uppercase tracking-wider text-slate-500">Total Return</th>
+            {factors.map((factor) => <th key={factor.key} className="py-2 px-2 text-left font-semibold uppercase tracking-wider text-slate-500">{factor.label}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          <tr className="border-b border-slate-100">
+            <td className="py-2 px-2 font-medium text-slate-700">{totalLabel}</td>
+            <td className={`py-2 px-2 font-semibold ${sheet.totalReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(sheet.totalReturn)}</td>
+            {factors.map((factor) => <td key={factor.key} className="py-2 px-2 text-slate-300">—</td>)}
+          </tr>
+          <tr className="border-b border-slate-100">
+            <td className="py-2 px-2 font-medium text-slate-700">{betaLabel}</td>
+            <td className="py-2 px-2 text-slate-300">—</td>
+            {factors.map((factor) => <td key={factor.key} className="py-2 px-2 font-medium text-slate-700">{fmt.num(factor.displayBeta)}</td>)}
+          </tr>
+          <tr className="border-b border-slate-100">
+            <td className="py-2 px-2 font-medium text-slate-700">Factor Return</td>
+            <td className="py-2 px-2 text-slate-300">—</td>
+            {factors.map((factor) => <td key={factor.key} className={`py-2 px-2 font-medium ${factor.factorReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(factor.factorReturn)}</td>)}
+          </tr>
+          <tr className={`border-b border-slate-100 ${accentClass}`}>
+            <td className="py-2 px-2 font-semibold text-slate-800">Beta × Factor Return</td>
+            <td className="py-2 px-2 text-slate-300">—</td>
+            {factors.map((factor) => <td key={factor.key} className={`py-2 px-2 font-semibold ${factor.displayContribution >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(factor.displayContribution)}</td>)}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Imputed Return</p>
+        <p className={`mt-1 text-lg font-bold ${sheet.imputedReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(sheet.imputedReturn)}</p>
+      </div>
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Idiosyncratic Return</p>
+        <p className={`mt-1 text-lg font-bold ${sheet.idiosyncraticReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(sheet.idiosyncraticReturn)}</p>
+      </div>
+    </div>
+  </Card>;
+}
+
+function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings, risk }) {
   const [returnView, setReturnView] = useState("weekly");
   const { computed, exited, totalVal, liveDailyReturn, liveBenchmarkReturn } = computeHoldings(holdings, settings);
   const liveDailyHistory = buildLiveDailyHistoryRows(dailyHistory, {
@@ -1800,6 +1917,17 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings }) {
   const periodNoun = returnView === "daily" ? "days" : "weeks";
   const comparisonTitle = returnView === "daily" ? "Daily Return Comparison" : "Weekly Return Comparison";
   const tableTitle = returnView === "daily" ? "Daily Return Table" : "Weekly Return Table";
+  const attributionSheet = buildAttributionSheetModel(returnView, risk?.analytics);
+  const absoluteSheetFactors = attributionSheet?.factors?.map((factor) => ({
+    ...factor,
+    displayBeta: factor.beta,
+    displayContribution: factor.absoluteContribution,
+  })) || [];
+  const excessSheetFactors = attributionSheet?.factors?.map((factor) => ({
+    ...factor,
+    displayBeta: factor.excessBeta,
+    displayContribution: factor.excessContribution,
+  })) || [];
 
   return <div className="space-y-6">
     <SectionHeader title="Returns" subtitle={`${returnView === "daily" ? "Workbook-backed daily history with live holdings refresh overlay" : "Workbook-backed weekly history"}, current attribution, and drawdown analysis across ${historyRows.length} ${periodNoun}`}>
@@ -1815,6 +1943,54 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings }) {
       <StatCard label="Hit Rate" value={fmt.pct(hitRate)} sub={`${chartData.filter((row) => row.portfolioReturn > 0).length}/${chartData.length || 0} up ${returnView === "daily" ? "days" : "weeks"}`} />
       <StatCard label={returnView === "daily" ? "Best Day" : "Best Week"} value={bestPeriod ? fmt.pct(bestPeriod.portfolioReturn) : "—"} sub={bestPeriod?.label || "—"} trend={bestPeriod && bestPeriod.portfolioReturn >= 0 ? "up" : "down"} color={bestPeriod && bestPeriod.portfolioReturn >= 0 ? "text-emerald-700" : "text-red-600"} />
       <StatCard label={returnView === "daily" ? "Worst Day" : "Worst Week"} value={worstPeriod ? fmt.pct(worstPeriod.portfolioReturn) : "—"} sub={worstPeriod?.label || "—"} trend="down" color="text-red-600" />
+    </div>
+    <div className="grid grid-cols-1 gap-4">
+      {attributionSheet ? <Card className="p-4 bg-slate-50 border-slate-200">
+        <h3 className="text-sm font-semibold text-slate-700">Workbook Attribution Example</h3>
+        <p className="mt-2 text-sm text-slate-700 leading-6">
+          Using the uploaded sheet logic for <span className="font-semibold text-slate-900">{attributionSheet.periodLabel}</span>, the absolute imputed return is <span className="font-semibold text-slate-900">{fmt.pct(attributionSheet.absolute.imputedReturn)}</span>, so idiosyncratic return is <span className={`font-semibold ${attributionSheet.absolute.idiosyncraticReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(attributionSheet.absolute.idiosyncraticReturn)}</span>.
+        </p>
+        <p className="mt-3 text-sm text-slate-700 leading-6">
+          For the excess sheet, the market beta is adjusted exactly as in the PDF: <span className="font-mono text-slate-900">beta_market - 1</span>. That produces an excess imputed return of <span className="font-semibold text-slate-900">{fmt.pct(attributionSheet.excess.imputedReturn)}</span> and an excess idiosyncratic return of <span className={`font-semibold ${attributionSheet.excess.idiosyncraticReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(attributionSheet.excess.idiosyncraticReturn)}</span>.
+        </p>
+        <div className="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-3">
+          <div className="rounded-lg border border-slate-200 bg-white p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Absolute Example</p>
+            <div className="space-y-1 font-mono text-[11px] leading-5 text-slate-700">
+              {attributionSheet.absolute.formulaLines.map((line) => <p key={line}>{line}</p>)}
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Excess Example</p>
+            <div className="space-y-1 font-mono text-[11px] leading-5 text-slate-700">
+              {attributionSheet.excess.formulaLines.map((line) => <p key={line}>{line}</p>)}
+            </div>
+          </div>
+        </div>
+        <p className="mt-3 text-xs text-slate-500">{attributionSheet.modelNote}</p>
+      </Card> : <Card className="p-4">
+        {risk?.isLoading || risk?.isRefreshing ? <div className="flex items-center gap-2 text-sm text-slate-600"><Loader2 size={16} className="animate-spin"/> Building the workbook-style attribution example from live regression data…</div> : <p className="text-sm text-slate-500">Workbook-style absolute and excess attribution becomes available once the live regression finishes.</p>}
+      </Card>}
+      {attributionSheet && <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <AttributionSheetTable
+          title="Absolute Return Attribution"
+          periodLabel={attributionSheet.periodLabel}
+          totalLabel={attributionSheet.periodKind === "daily" ? "Portfolio Daily Return" : "Portfolio Weekly Return"}
+          betaLabel="Portfolio Beta"
+          sheet={attributionSheet.absolute}
+          factors={absoluteSheetFactors}
+          accentClass="bg-amber-50"
+        />
+        <AttributionSheetTable
+          title="Excess Return Attribution"
+          periodLabel={`${attributionSheet.periodLabel} · benchmark-relative`}
+          totalLabel={attributionSheet.periodKind === "daily" ? "Portfolio Excess Return" : "Weekly Excess Return"}
+          betaLabel="Beta (Market - 1)"
+          sheet={attributionSheet.excess}
+          factors={excessSheetFactors}
+          accentClass="bg-blue-50"
+        />
+      </div>}
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Cumulative Return</h3><ResponsiveContainer width="100%" height={260}><ComposedChart data={cumulativeData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer></Card>
@@ -2289,7 +2465,7 @@ export default function App() {
         <main className={`flex-1 min-h-0 ${page==='catalyst'?'overflow-hidden p-0 bg-[#0f1117]':'overflow-y-auto p-6'} print:p-0`}>
           {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory} risk={risk}/>}
           {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} setSettings={db.setSettings} dailyHistory={db.dailyHistory} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
-          {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory}/>}
+          {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory} risk={risk}/>}
           {page==="risk" && <RiskPage settings={db.settings} risk={risk}/>}
           {page==="stoploss" && <StopLossPage holdings={db.holdings} settings={db.settings}/>}
           {page==="report" && <TeamReportPage holdings={db.holdings} settings={db.settings} report={db.report} setReport={db.setReport} reportMeta={db.reportMeta} setReportMeta={db.setReportMeta}/>}

@@ -266,6 +266,12 @@ function bucketByWeek(rows) {
       portfolioReturn,
       predictedReturn,
       benchmarkReturn,
+      compoundedPortfolioReturn: compoundReturns(bucket.map((row) => row.actualReturn)),
+      compoundedPredictedReturn: compoundReturns(bucket.map((row) => row.predictedReturn)),
+      compoundedBenchmarkReturn: compoundReturns(bucket.map((row) => row.marketFactor)),
+      marketFactorReturn: compoundReturns(bucket.map((row) => row.marketFactor)),
+      valueFactorReturn: compoundReturns(bucket.map((row) => row.valueFactor)),
+      momentumFactorReturn: compoundReturns(bucket.map((row) => row.momentumFactor)),
       marketContrib,
       valueContrib,
       momentumContrib,
@@ -362,6 +368,7 @@ export async function POST(request) {
         subThemeRisk: [],
         weeklyAttribution: [],
         latestWeek: null,
+        latestDay: null,
         drawdownSeries: [],
         drawdownSummary: [],
       });
@@ -519,6 +526,7 @@ export async function POST(request) {
         subThemeRisk: [],
         weeklyAttribution: [],
         latestWeek: null,
+        latestDay: null,
         drawdownSeries: [],
         drawdownSummary: [],
         updatedAt: new Date().toISOString(),
@@ -565,6 +573,21 @@ export async function POST(request) {
 
     const weeklyAttribution = bucketByWeek(portfolioDaily).slice(-16);
     const latestWeek = weeklyAttribution.at(-1) || null;
+    const latestDayRow = portfolioDaily.at(-1) || null;
+    const latestDay = latestDayRow ? {
+      date: latestDayRow.date,
+      portfolioReturn: latestDayRow.actualReturn,
+      predictedReturn: latestDayRow.predictedReturn,
+      benchmarkReturn: latestDayRow.marketFactor,
+      marketFactorReturn: latestDayRow.marketFactor,
+      valueFactorReturn: latestDayRow.valueFactor,
+      momentumFactorReturn: latestDayRow.momentumFactor,
+      marketContrib: latestDayRow.marketContrib,
+      valueContrib: latestDayRow.valueContrib,
+      momentumContrib: latestDayRow.momentumContrib,
+      alphaContrib: latestDayRow.alphaContrib,
+      residualGap: latestDayRow.residualGap,
+    } : null;
     const latestWeekDates = latestWeek ? portfolioDaily.filter((row) => isoWeekLabel(row.date) === latestWeek.week).map((row) => row.date) : [];
 
     const subThemeMap = {};
@@ -643,6 +666,7 @@ export async function POST(request) {
       subThemeRisk,
       weeklyAttribution,
       latestWeek,
+      latestDay,
       drawdownSeries,
       drawdownSummary,
     });
