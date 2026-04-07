@@ -445,6 +445,8 @@ export async function POST(request) {
         latestDay: null,
         drawdownSeries: [],
         drawdownSummary: [],
+        holdingExposures: [],
+        dailySeries: [],
       });
     }
 
@@ -613,6 +615,8 @@ export async function POST(request) {
         latestDay: null,
         drawdownSeries: [],
         drawdownSummary: [],
+        holdingExposures: [],
+        dailySeries: [],
         updatedAt: new Date().toISOString(),
       });
     }
@@ -679,6 +683,31 @@ export async function POST(request) {
 
     const drawdownSeries = buildDrawdownSeries(portfolioDaily);
     const drawdownSummary = summarizeDrawdowns(drawdownSeries);
+    const holdingExposures = holdingAnalytics.map((holding) => ({
+      ticker: holding.ticker,
+      theme: holding.theme || "Other",
+      subTheme: holding.subTheme || holding.theme || "Other",
+      shares: holding.shares,
+      currentPrice: holding.currentPrice,
+      currentValue: holding.currentValue,
+      weight: holding.weight,
+      marketBeta: holding.marketBeta,
+      valueBeta: holding.valueBeta,
+      momentumBeta: holding.momentumBeta,
+      growthBeta: holding.growthBeta,
+      alphaDaily: holding.alphaDaily,
+      observations: holding.observations,
+    }));
+    const dailySeries = portfolioDaily.map((row) => ({
+      date: row.date,
+      actualReturn: row.actualReturn,
+      predictedReturn: row.predictedReturn,
+      marketFactor: row.marketFactor,
+      valueFactor: row.valueFactor,
+      momentumFactor: row.momentumFactor,
+      growthFactor: row.growthFactor,
+      residualGap: row.residualGap,
+    }));
 
     return Response.json({
       updatedAt: new Date().toISOString(),
@@ -710,6 +739,8 @@ export async function POST(request) {
       latestDay,
       drawdownSeries,
       drawdownSummary,
+      holdingExposures,
+      dailySeries,
     });
   } catch (error) {
     return Response.json({ error: error.message }, { status: 500 });

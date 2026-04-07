@@ -224,8 +224,8 @@ export default function CommentPanel({ page, group }: Props) {
             position: "fixed",
             bottom: 88,
             right: 24,
-            width: 380,
-            maxHeight: "min(520px, calc(100vh - 120px))",
+            width: "min(420px, calc(100vw - 32px))",
+            maxHeight: "min(600px, calc(100vh - 104px))",
             background: "#fff",
             borderRadius: 16,
             boxShadow: "0 8px 40px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.05)",
@@ -475,10 +475,10 @@ export default function CommentPanel({ page, group }: Props) {
               {/* Dropdown */}
               {showUserDropdown && (
                 <div style={{
-                  position: "absolute", top: "100%", left: 20, marginTop: 4,
+                  position: "absolute", bottom: "calc(100% + 6px)", left: 20,
                   background: "#fff", border: "1px solid #e2e8f0",
                   borderRadius: 8, boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
-                  zIndex: 10, overflow: "hidden",
+                  zIndex: 20, overflow: "hidden", minWidth: 170,
                 }}>
                   {USERNAME_OPTIONS.map((name) => (
                     <button
