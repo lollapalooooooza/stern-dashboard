@@ -49,7 +49,7 @@ const THEME_COLORS = {
   Benchmark:"#1e293b","AI-Industrial":"#2563eb","Digital Infra":"#7c3aed",Experientials:"#0891b2",
   Security:"#dc2626","Silver Economy":"#ec4899","Silver":"#ec4899",Nuclear:"#d97706",Payments:"#059669",
   Waste:"#84cc16",Battery:"#f97316","Legacy Software":"#6366f1",Adtech:"#14b8a6",
-  "Water PFAS":"#0f766e",Banks:"#0f766e","War?":"#9a3412",
+  "Water PFAS":"#0f766e",Banks:"#0f766e",War:"#9a3412","War?":"#9a3412",
   Sports:"#8b5cf6","Digital Finance":"#06b6d4",Batteries:"#f97316","Waste Management":"#84cc16",Cash:"#94a3b8",
 };
 const CHART_COLORS = ["#1e3a5f","#2563eb","#7c3aed","#dc2626","#059669","#d97706","#0891b2","#ec4899","#84cc16","#f97316","#6366f1","#14b8a6"];
