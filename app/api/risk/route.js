@@ -346,6 +346,70 @@ function summarizeDrawdowns(drawdownSeries) {
   });
 }
 
+function buildSubThemeWeeklyAttribution(holdingAnalytics, portfolioDaily, latestWeek) {
+  if (!latestWeek) return [];
+  const weekRows = portfolioDaily.filter((row) => isoWeekLabel(row.date) === latestWeek.week);
+  if (!weekRows.length) return [];
+
+  const subThemeMap = {};
+  for (const row of weekRows) {
+    const available = holdingAnalytics.filter((holding) => holding.daily.has(row.date) && holding.weight > 0);
+    const availableWeight = available.reduce((sum, holding) => sum + holding.weight, 0);
+    if (!available.length || availableWeight <= 0) continue;
+    const normalized = 1 / availableWeight;
+
+    for (const holding of available) {
+      const key = holding.subTheme || holding.theme || "Other";
+      if (!subThemeMap[key]) {
+        subThemeMap[key] = {
+          subTheme: key,
+          weightSum: 0,
+          betaExposureSum: 0,
+          marketContrib: 0,
+          valueContrib: 0,
+          momentumContrib: 0,
+          alphaContrib: 0,
+          predictedContribution: 0,
+          actualContribution: 0,
+        };
+      }
+      const bucket = subThemeMap[key];
+      const day = holding.daily.get(row.date);
+      const dailyWeight = holding.weight * normalized;
+      bucket.weightSum += dailyWeight;
+      bucket.betaExposureSum += dailyWeight * holding.marketBeta;
+      bucket.marketContrib += dailyWeight * day.marketContrib;
+      bucket.valueContrib += dailyWeight * day.valueContrib;
+      bucket.momentumContrib += dailyWeight * day.momentumContrib;
+      bucket.alphaContrib += dailyWeight * day.alphaContrib;
+      bucket.predictedContribution += dailyWeight * day.predictedReturn;
+      bucket.actualContribution += dailyWeight * day.actualReturn;
+    }
+  }
+
+  const periodCount = weekRows.length;
+  return Object.values(subThemeMap)
+    .map((row) => {
+      const avgWeight = periodCount > 0 ? row.weightSum / periodCount : 0;
+      const avgBetaExposure = periodCount > 0 ? row.betaExposureSum / periodCount : 0;
+      return {
+        subTheme: row.subTheme,
+        weight: avgWeight,
+        avgBeta: avgWeight > 0 ? avgBetaExposure / avgWeight : 0,
+        marketContrib: row.marketContrib,
+        valueContrib: row.valueContrib,
+        momentumContrib: row.momentumContrib,
+        alphaContrib: row.alphaContrib,
+        predictedContribution: row.predictedContribution,
+        actualContribution: row.actualContribution,
+        residualGap: row.actualContribution - row.predictedContribution,
+        predictedReturn: avgWeight > 0 ? row.predictedContribution / avgWeight : 0,
+        actualReturn: avgWeight > 0 ? row.actualContribution / avgWeight : 0,
+      };
+    })
+    .sort((a, b) => Math.abs(b.predictedContribution) - Math.abs(a.predictedContribution));
+}
+
 export async function POST(request) {
   try {
     const body = await request.json().catch(() => ({}));
@@ -588,54 +652,7 @@ export async function POST(request) {
       alphaContrib: latestDayRow.alphaContrib,
       residualGap: latestDayRow.residualGap,
     } : null;
-    const latestWeekDates = latestWeek ? portfolioDaily.filter((row) => isoWeekLabel(row.date) === latestWeek.week).map((row) => row.date) : [];
-
-    const subThemeMap = {};
-    for (const holding of holdingAnalytics) {
-      const key = holding.subTheme || holding.theme || "Other";
-      if (!subThemeMap[key]) {
-        subThemeMap[key] = {
-          subTheme: key,
-          weight: 0,
-          marketExposure: 0,
-          valueExposure: 0,
-          momentumExposure: 0,
-          alphaExposure: 0,
-          actualContribution: 0,
-          predictedContribution: 0,
-        };
-      }
-      const bucket = subThemeMap[key];
-      bucket.weight += holding.weight;
-      bucket.marketExposure += holding.weight * holding.marketBeta;
-      bucket.valueExposure += holding.weight * holding.valueBeta;
-      bucket.momentumExposure += holding.weight * holding.momentumBeta;
-      bucket.alphaExposure += holding.weight * holding.alphaDaily * Math.max(latestWeekDates.length, 1);
-
-      for (const date of latestWeekDates) {
-        const day = holding.daily.get(date);
-        if (!day) continue;
-        bucket.actualContribution += holding.weight * day.actualReturn;
-        bucket.predictedContribution += holding.weight * day.predictedReturn;
-      }
-    }
-
-    const subThemeRisk = Object.values(subThemeMap)
-      .map((row) => ({
-        subTheme: row.subTheme,
-        weight: row.weight,
-        avgBeta: row.weight > 0 ? row.marketExposure / row.weight : 0,
-        marketContrib: row.marketExposure * (latestWeek?.benchmarkReturn || 0),
-        valueContrib: row.valueExposure * (Math.abs(portfolioValueBeta) > 1e-9 ? (latestWeek?.valueContrib || 0) / portfolioValueBeta : 0),
-        momentumContrib: row.momentumExposure * (Math.abs(portfolioMomentumBeta) > 1e-9 ? (latestWeek?.momentumContrib || 0) / portfolioMomentumBeta : 0),
-        alphaContrib: row.alphaExposure,
-        predictedContribution: row.predictedContribution,
-        actualContribution: row.actualContribution,
-        residualGap: row.actualContribution - row.predictedContribution,
-        predictedReturn: row.weight > 0 ? row.predictedContribution / row.weight : 0,
-        actualReturn: row.weight > 0 ? row.actualContribution / row.weight : 0,
-      }))
-      .sort((a, b) => Math.abs(b.predictedContribution) - Math.abs(a.predictedContribution));
+    const subThemeRisk = buildSubThemeWeeklyAttribution(holdingAnalytics, portfolioDaily, latestWeek);
 
     const drawdownSeries = buildDrawdownSeries(portfolioDaily);
     const drawdownSummary = summarizeDrawdowns(drawdownSeries);
