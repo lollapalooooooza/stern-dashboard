@@ -3,7 +3,7 @@ const HISTORY_INTERVAL = "1d";
 const HISTORY_CACHE_TTL_MS = 15 * 60 * 1000;
 const MIN_MULTI_FACTOR_OBS = 45;
 const MIN_MARKET_ONLY_OBS = 15;
-const FACTOR_SYMBOLS = ["SPY", "IVE", "MTUM"];
+const FACTOR_SYMBOLS = ["SPY", "IVE", "MTUM", "IVW"];
 
 const historyCache = new Map();
 
@@ -230,16 +230,21 @@ async function mapWithConcurrency(items, limit, worker) {
 }
 
 function buildFactorRows(factorReturnMaps) {
-  const hasStyleFactors = factorReturnMaps.value.size > 0 && factorReturnMaps.momentum.size > 0;
+  const hasValueFactor = factorReturnMaps.value.size > 0;
+  const hasMomentumFactor = factorReturnMaps.momentum.size > 0;
+  const hasGrowthFactor = factorReturnMaps.growth.size > 0;
   const dates = [...factorReturnMaps.market.keys()]
-    .filter((date) => !hasStyleFactors || (factorReturnMaps.value.has(date) && factorReturnMaps.momentum.has(date)))
+    .filter((date) => (!hasValueFactor || factorReturnMaps.value.has(date))
+      && (!hasMomentumFactor || factorReturnMaps.momentum.has(date))
+      && (!hasGrowthFactor || factorReturnMaps.growth.has(date)))
     .sort();
 
   return dates.map((date) => ({
     date,
     market: factorReturnMaps.market.get(date),
-    value: hasStyleFactors ? factorReturnMaps.value.get(date) : 0,
-    momentum: hasStyleFactors ? factorReturnMaps.momentum.get(date) : 0,
+    value: hasValueFactor ? factorReturnMaps.value.get(date) : 0,
+    momentum: hasMomentumFactor ? factorReturnMaps.momentum.get(date) : 0,
+    growth: hasGrowthFactor ? factorReturnMaps.growth.get(date) : 0,
   }));
 }
 
@@ -272,9 +277,11 @@ function bucketByWeek(rows) {
       marketFactorReturn: compoundReturns(bucket.map((row) => row.marketFactor)),
       valueFactorReturn: compoundReturns(bucket.map((row) => row.valueFactor)),
       momentumFactorReturn: compoundReturns(bucket.map((row) => row.momentumFactor)),
+      growthFactorReturn: compoundReturns(bucket.map((row) => row.growthFactor)),
       marketContrib,
       valueContrib,
       momentumContrib,
+      growthContrib: bucket.reduce((sum, row) => sum + row.growthContrib, 0),
       alphaContrib,
       residualGap,
     };
@@ -369,6 +376,7 @@ function buildSubThemeWeeklyAttribution(holdingAnalytics, portfolioDaily, latest
           valueContrib: 0,
           momentumContrib: 0,
           alphaContrib: 0,
+          growthContrib: 0,
           predictedContribution: 0,
           actualContribution: 0,
         };
@@ -381,6 +389,7 @@ function buildSubThemeWeeklyAttribution(holdingAnalytics, portfolioDaily, latest
       bucket.marketContrib += dailyWeight * day.marketContrib;
       bucket.valueContrib += dailyWeight * day.valueContrib;
       bucket.momentumContrib += dailyWeight * day.momentumContrib;
+      bucket.growthContrib += dailyWeight * day.growthContrib;
       bucket.alphaContrib += dailyWeight * day.alphaContrib;
       bucket.predictedContribution += dailyWeight * day.predictedReturn;
       bucket.actualContribution += dailyWeight * day.actualReturn;
@@ -399,6 +408,7 @@ function buildSubThemeWeeklyAttribution(holdingAnalytics, portfolioDaily, latest
         marketContrib: row.marketContrib,
         valueContrib: row.valueContrib,
         momentumContrib: row.momentumContrib,
+        growthContrib: row.growthContrib,
         alphaContrib: row.alphaContrib,
         predictedContribution: row.predictedContribution,
         actualContribution: row.actualContribution,
@@ -453,20 +463,24 @@ export async function POST(request) {
       SPY: historyMap.get("SPY") || [],
       IVE: historyMap.get("IVE") || [],
       MTUM: historyMap.get("MTUM") || [],
+      IVW: historyMap.get("IVW") || [],
     };
 
     const spyReturns = createReturnMap(factorPriceSeries.SPY);
     const iveReturns = createReturnMap(factorPriceSeries.IVE);
     const mtumReturns = createReturnMap(factorPriceSeries.MTUM);
+    const ivwReturns = createReturnMap(factorPriceSeries.IVW);
     const factorReturnMaps = {
       market: spyReturns,
       value: new Map(),
       momentum: new Map(),
+      growth: new Map(),
     };
 
     for (const [date, spyValue] of spyReturns.entries()) {
       if (iveReturns.has(date)) factorReturnMaps.value.set(date, iveReturns.get(date) - spyValue);
       if (mtumReturns.has(date)) factorReturnMaps.momentum.set(date, mtumReturns.get(date) - spyValue);
+      if (ivwReturns.has(date)) factorReturnMaps.growth.set(date, ivwReturns.get(date) - spyValue);
     }
 
     const factorRows = buildFactorRows(factorReturnMaps);
@@ -490,18 +504,18 @@ export async function POST(request) {
       const returnMap = createReturnMap(historyMap.get(holding.ticker) || []);
       const alignedDates = factorRows.filter((row) => returnMap.has(row.date));
       const y = alignedDates.map((row) => returnMap.get(row.date));
-      const x = alignedDates.map((row) => [row.market, row.value, row.momentum]);
+      const x = alignedDates.map((row) => [row.market, row.value, row.momentum, row.growth]);
 
       let regression = null;
       if (y.length >= MIN_MULTI_FACTOR_OBS) {
-        regression = runRegression(y, x, 3);
+        regression = runRegression(y, x, 4);
       }
       if (!regression && y.length >= MIN_MARKET_ONLY_OBS) {
         const marketOnly = runRegression(y, alignedDates.map((row) => [row.market]), 1);
         if (marketOnly) {
           regression = {
             ...marketOnly,
-            factors: [marketOnly.factors[0] || 0, 0, 0],
+            factors: [marketOnly.factors[0] || 0, 0, 0, 0],
             predicted: marketOnly.predicted,
           };
         }
@@ -509,7 +523,7 @@ export async function POST(request) {
       if (!regression) {
         regression = {
           alpha: mean(y),
-          factors: [0, 0, 0],
+          factors: [0, 0, 0, 0],
           predicted: y.map(() => mean(y)),
           residuals: y.map((value) => value - mean(y)),
           rSquared: 0,
@@ -524,14 +538,16 @@ export async function POST(request) {
         const marketContrib = regression.factors[0] * factor.market;
         const valueContrib = regression.factors[1] * factor.value;
         const momentumContrib = regression.factors[2] * factor.momentum;
+        const growthContrib = regression.factors[3] * factor.growth;
         const alphaContrib = regression.alpha;
-        const predictedReturn = marketContrib + valueContrib + momentumContrib + alphaContrib;
+        const predictedReturn = marketContrib + valueContrib + momentumContrib + growthContrib + alphaContrib;
         daily.set(factor.date, {
           actualReturn,
           predictedReturn,
           marketContrib,
           valueContrib,
           momentumContrib,
+          growthContrib,
           alphaContrib,
         });
       }
@@ -543,6 +559,7 @@ export async function POST(request) {
         marketBeta: regression.factors[0] || 0,
         valueBeta: regression.factors[1] || 0,
         momentumBeta: regression.factors[2] || 0,
+        growthBeta: regression.factors[3] || 0,
         alphaDaily: regression.alpha || 0,
         rSquared: regression.rSquared || 0,
         observations: regression.observations || 0,
@@ -561,11 +578,13 @@ export async function POST(request) {
         marketFactor: factor.market,
         valueFactor: factor.value,
         momentumFactor: factor.momentum,
+        growthFactor: factor.growth,
         actualReturn: 0,
         predictedReturn: 0,
         marketContrib: 0,
         valueContrib: 0,
         momentumContrib: 0,
+        growthContrib: 0,
         alphaContrib: 0,
       };
 
@@ -577,6 +596,7 @@ export async function POST(request) {
         row.marketContrib += weight * day.marketContrib;
         row.valueContrib += weight * day.valueContrib;
         row.momentumContrib += weight * day.momentumContrib;
+        row.growthContrib += weight * day.growthContrib;
         row.alphaContrib += weight * day.alphaContrib;
       }
       row.residualGap = row.actualReturn - row.predictedReturn;
@@ -606,6 +626,7 @@ export async function POST(request) {
     const portfolioBeta = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.marketBeta, 0);
     const portfolioValueBeta = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.valueBeta, 0);
     const portfolioMomentumBeta = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.momentumBeta, 0);
+    const portfolioGrowthBeta = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.growthBeta, 0);
     const portfolioAlphaDaily = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.alphaDaily, 0);
     const actualMean = mean(portfolioActual);
     const ssTotal = portfolioActual.reduce((sum, value) => sum + (value - actualMean) ** 2, 0);
@@ -646,9 +667,11 @@ export async function POST(request) {
       marketFactorReturn: latestDayRow.marketFactor,
       valueFactorReturn: latestDayRow.valueFactor,
       momentumFactorReturn: latestDayRow.momentumFactor,
+      growthFactorReturn: latestDayRow.growthFactor,
       marketContrib: latestDayRow.marketContrib,
       valueContrib: latestDayRow.valueContrib,
       momentumContrib: latestDayRow.momentumContrib,
+      growthContrib: latestDayRow.growthContrib,
       alphaContrib: latestDayRow.alphaContrib,
       residualGap: latestDayRow.residualGap,
     } : null;
@@ -663,6 +686,7 @@ export async function POST(request) {
         portfolioBeta,
         valueBeta: portfolioValueBeta,
         momentumBeta: portfolioMomentumBeta,
+        growthBeta: portfolioGrowthBeta,
         alphaDaily: portfolioAlphaDaily,
         annualizedVol: actualVol,
         systematicVol: predictedVol,

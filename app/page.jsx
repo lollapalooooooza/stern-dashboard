@@ -565,6 +565,86 @@ function formatDetailForClipboard(detail) {
     .join("\n\n");
 }
 
+function CalculationDetailButton({ detail }) {
+  const [open, setOpen] = useState(false);
+  const [copiedState, setCopiedState] = useState("");
+
+  useEffect(() => {
+    if (!copiedState) return undefined;
+    const timer = setTimeout(() => setCopiedState(""), 1500);
+    return () => clearTimeout(timer);
+  }, [copiedState]);
+
+  if (!detail) return null;
+
+  const handleCopyDetail = async () => {
+    try {
+      await copyPlainText(formatDetailForClipboard(detail));
+      setCopiedState("details");
+    } catch {
+      setCopiedState("copy failed");
+    }
+  };
+
+  const handleCopyPython = async () => {
+    try {
+      await copyPlainText(detail.pythonSource);
+      setCopiedState("python");
+    } catch {
+      setCopiedState("copy failed");
+    }
+  };
+
+  const handleDownloadPython = () => {
+    downloadTextFile(detail.pythonFileName, detail.pythonSource);
+    setCopiedState("downloaded");
+  };
+
+  return <>
+    <button onClick={() => setOpen(true)} className="px-2.5 py-1.5 text-[11px] font-medium rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">Detail</button>
+    {open && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/30 backdrop-blur-sm p-4" onClick={() => setOpen(false)}>
+      <div className="w-full max-w-3xl max-h-[85vh] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Calculation Detail</p>
+              <h3 className="mt-1 text-sm font-bold text-slate-900">{detail.title}</h3>
+              <p className="mt-1 text-lg font-bold text-slate-900">{detail.displayedValue}</p>
+              {detail.displayedSub && <p className="text-xs text-slate-500 mt-0.5">{detail.displayedSub}</p>}
+              {detail.source && <p className="text-[11px] text-slate-500 mt-2">{detail.source}</p>}
+            </div>
+            <button onClick={() => setOpen(false)} className="text-slate-400 hover:text-slate-600"><X size={16}/></button>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button onClick={handleCopyDetail} className="px-2.5 py-1.5 text-[11px] font-medium rounded-md border border-slate-300 text-slate-700 hover:bg-white">Copy Details</button>
+            <button onClick={handleCopyPython} className="px-2.5 py-1.5 text-[11px] font-medium rounded-md border border-slate-300 text-slate-700 hover:bg-white">Copy .py</button>
+            <button onClick={handleDownloadPython} className="px-2.5 py-1.5 text-[11px] font-medium rounded-md bg-slate-800 text-white hover:bg-slate-700">Download .py</button>
+            {copiedState && <span className="inline-flex items-center px-2 py-1 text-[11px] rounded-md bg-emerald-50 text-emerald-700">{copiedState}</span>}
+          </div>
+        </div>
+        <div className="max-h-[calc(85vh-8rem)] overflow-y-auto p-4 space-y-3">
+          {detail.formula?.length > 0 && <div className="rounded-xl border border-slate-200 bg-white p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Formula</p>
+            <div className="space-y-1 font-mono text-[11px] leading-5 text-slate-700">{detail.formula.map((line) => <p key={line}>{line}</p>)}</div>
+          </div>}
+          {detail.inputs?.length > 0 && <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Current Inputs</p>
+            <div className="space-y-1 font-mono text-[11px] leading-5 text-slate-700">{detail.inputs.map((line) => <p key={line}>{line}</p>)}</div>
+          </div>}
+          {detail.calculation?.length > 0 && <div className="rounded-xl border border-slate-200 bg-white p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Calculation</p>
+            <div className="space-y-1 font-mono text-[11px] leading-5 text-slate-700">{detail.calculation.map((line) => <p key={line}>{line}</p>)}</div>
+          </div>}
+          {detail.notes?.length > 0 && <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 mb-2">Notes</p>
+            <div className="space-y-1 text-[11px] leading-5 text-slate-600">{detail.notes.map((line) => <p key={line}>{line}</p>)}</div>
+          </div>}
+        </div>
+      </div>
+    </div>}
+  </>;
+}
+
 const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-700", tooltip, editable, onEdit, detail }) => {
   const [show, setShow] = useState(false);
   const [ev, setEv] = useState("");
@@ -1726,7 +1806,77 @@ const ATTRIBUTION_SHEET_FACTORS = [
   { key: "market", label: "S&P 500", betaKey: "portfolioBeta", returnKey: "marketFactorReturn" },
   { key: "value", label: "Value", betaKey: "valueBeta", returnKey: "valueFactorReturn" },
   { key: "momentum", label: "Momentum", betaKey: "momentumBeta", returnKey: "momentumFactorReturn" },
+  { key: "growth", label: "Growth", betaKey: "growthBeta", returnKey: "growthFactorReturn" },
 ];
+
+function buildAttributionSheetDetail(model, sheetKey) {
+  const sheet = model?.[sheetKey];
+  if (!model || !sheet) return null;
+  const isExcess = sheetKey === "excess";
+  const factorRows = model.factors.map((factor) => ({
+    name: factor.label,
+    beta: isExcess ? factor.excessBeta : factor.beta,
+    factorReturn: factor.factorReturn,
+    contribution: isExcess ? factor.excessContribution : factor.absoluteContribution,
+  }));
+  const payload = {
+    period_label: model.periodLabel,
+    total_return: sheet.totalReturn,
+    benchmark_return: model.excess.benchmarkReturn,
+    factors: factorRows,
+  };
+
+  return {
+    title: isExcess ? "Excess Return Attribution Detail" : "Absolute Return Attribution Detail",
+    displayedValue: `Imputed ${fmt.pct(sheet.imputedReturn)}`,
+    displayedSub: `Idiosyncratic ${fmt.pct(sheet.idiosyncraticReturn)}`,
+    source: "Built from the live factor betas and the current period factor returns shown in the table.",
+    formula: [
+      isExcess ? "excess_total_return = portfolio_return - benchmark_return" : "total_return = portfolio_return",
+      isExcess ? "market_beta_excess = market_beta - 1" : "market_beta is unchanged in the absolute table",
+      "factor_contribution_i = beta_i × factor_return_i",
+      "imputed_return = Σ(factor_contribution_i)",
+      isExcess ? "excess_idiosyncratic = excess_total_return - imputed_return" : "idiosyncratic_return = total_return - imputed_return",
+    ],
+    inputs: [
+      `Period = ${model.periodLabel}`,
+      `Displayed total return = ${fmt.pct(sheet.totalReturn)}`,
+      ...(isExcess ? [`Benchmark return = ${fmt.pct(model.excess.benchmarkReturn)}`] : []),
+      ...factorRows.map((row) => `${row.name}: beta ${fmt.num(row.beta, 4)}, factor return ${fmt.pct(row.factorReturn)}`),
+    ],
+    calculation: [
+      ...factorRows.map((row) => `${row.name}: ${fmt.num(row.beta, 4)} × ${fmt.pct(row.factorReturn)} = ${fmt.pct(row.contribution)}`),
+      `imputed_return = ${factorRows.map((row) => fmt.pct(row.contribution)).join(" + ")} = ${fmt.pct(sheet.imputedReturn)}`,
+      `${isExcess ? "excess_" : ""}idiosyncratic_return = ${fmt.pct(sheet.totalReturn)} - ${fmt.pct(sheet.imputedReturn)} = ${fmt.pct(sheet.idiosyncraticReturn)}`,
+    ],
+    notes: [
+      "The exported Python script reproduces the factor rows and totals shown on-screen.",
+      isExcess ? "Only the market beta is adjusted by subtracting 1 in the excess table." : "All factor betas are used directly in the absolute table.",
+    ],
+    pythonFileName: isExcess ? "excess_return_attribution_detail.py" : "absolute_return_attribution_detail.py",
+    pythonSource: buildPythonScript(`Recompute ${isExcess ? "excess" : "absolute"} return attribution detail`, payload, [
+      'factors = data["factors"]',
+      'rows = []',
+      'for row in factors:',
+      '    rows.append({',
+      '        "factor": row["name"],',
+      '        "beta": round(row["beta"], 6) if row["beta"] is not None else None,',
+      '        "factor_return": round(row["factor_return"], 6) if row["factor_return"] is not None else None,',
+      '        "contribution": round((row["beta"] or 0) * (row["factor_return"] or 0), 6),',
+      '    })',
+      'imputed = fsum(item["contribution"] for item in rows)',
+      'result = {',
+      '    "period": data["period_label"],',
+      '    "table_rows": rows,',
+      '    "total_return": round(data["total_return"], 6),',
+      '    "benchmark_return": round(data["benchmark_return"], 6),',
+      '    "imputed_return": round(imputed, 6),',
+      '    "idiosyncratic_return": round(data["total_return"] - imputed, 6),',
+      '}',
+      'print(json.dumps(result, indent=2))',
+    ]),
+  };
+}
 
 function buildAttributionSheetModel(returnView, analytics) {
   const metrics = analytics?.metrics;
@@ -1768,7 +1918,7 @@ function buildAttributionSheetModel(returnView, analytics) {
   return {
     periodLabel: returnView === "daily" ? fmt.date(period.date) : `${period.week} · ${fmt.date(period.date)}`,
     periodKind: returnView === "daily" ? "daily" : "weekly",
-    modelNote: "The uploaded sheet uses S&P 500 / Value / Momentum / Growth. The live dashboard currently models S&P 500 / Value / Momentum, so the workbook-style tables below follow the same formulas with the live factors currently available.",
+    modelNote: "The logic is: take the period return, apply each factor beta to that factor's period return, sum those contributions into an imputed return, and treat the remaining difference as idiosyncratic return.",
     factors,
     absolute: {
       totalReturn,
@@ -1787,11 +1937,14 @@ function buildAttributionSheetModel(returnView, analytics) {
   };
 }
 
-function AttributionSheetTable({ title, periodLabel, totalLabel, betaLabel, sheet, factors, accentClass = "bg-amber-50" }) {
+function AttributionSheetTable({ title, periodLabel, totalLabel, betaLabel, sheet, factors, accentClass = "bg-amber-50", detail }) {
   return <Card className="p-4">
-    <div className="mb-3">
-      <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
-      <p className="text-xs text-slate-500">{periodLabel}</p>
+    <div className="mb-3 flex items-start justify-between gap-3">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
+        <p className="text-xs text-slate-500">{periodLabel}</p>
+      </div>
+      <CalculationDetailButton detail={detail}/>
     </div>
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
@@ -1900,8 +2053,9 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings, risk }) 
   const cumulativePortfolio = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].portfolio : 0;
   const cumulativeBenchmark = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].benchmark : 0;
   const excessReturn = cumulativePortfolio - cumulativeBenchmark;
-  const bestPeriod = chartData.length ? [...chartData].sort((a, b) => b.portfolioReturn - a.portfolioReturn)[0] : null;
-  const worstPeriod = chartData.length ? [...chartData].sort((a, b) => a.portfolioReturn - b.portfolioReturn)[0] : null;
+  const bestWorstSample = returnView === "weekly" && chartData.length > 5 ? chartData.slice(5) : chartData;
+  const bestPeriod = bestWorstSample.length ? [...bestWorstSample].sort((a, b) => b.portfolioReturn - a.portfolioReturn)[0] : null;
+  const worstPeriod = bestWorstSample.length ? [...bestWorstSample].sort((a, b) => a.portfolioReturn - b.portfolioReturn)[0] : null;
   const historyTable = [...chartData].reverse();
   const hitRate = chartData.length ? chartData.filter((row) => row.portfolioReturn > 0).length / chartData.length : 0;
   const drawdownSeries = buildReturnDrawdownSeries(chartData);
@@ -1928,6 +2082,8 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings, risk }) 
     displayBeta: factor.excessBeta,
     displayContribution: factor.excessContribution,
   })) || [];
+  const absoluteSheetDetail = attributionSheet ? buildAttributionSheetDetail(attributionSheet, "absolute") : null;
+  const excessSheetDetail = attributionSheet ? buildAttributionSheetDetail(attributionSheet, "excess") : null;
 
   return <div className="space-y-6">
     <SectionHeader title="Returns" subtitle={`${returnView === "daily" ? "Workbook-backed daily history with live holdings refresh overlay" : "Workbook-backed weekly history"}, current attribution, and drawdown analysis across ${historyRows.length} ${periodNoun}`}>
@@ -1948,10 +2104,10 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings, risk }) 
       {attributionSheet ? <Card className="p-4 bg-slate-50 border-slate-200">
         <h3 className="text-sm font-semibold text-slate-700">Workbook Attribution Example</h3>
         <p className="mt-2 text-sm text-slate-700 leading-6">
-          Using the uploaded sheet logic for <span className="font-semibold text-slate-900">{attributionSheet.periodLabel}</span>, the absolute imputed return is <span className="font-semibold text-slate-900">{fmt.pct(attributionSheet.absolute.imputedReturn)}</span>, so idiosyncratic return is <span className={`font-semibold ${attributionSheet.absolute.idiosyncraticReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(attributionSheet.absolute.idiosyncraticReturn)}</span>.
+          Using this workbook-style attribution logic for <span className="font-semibold text-slate-900">{attributionSheet.periodLabel}</span>, the absolute imputed return is <span className="font-semibold text-slate-900">{fmt.pct(attributionSheet.absolute.imputedReturn)}</span>, so idiosyncratic return is <span className={`font-semibold ${attributionSheet.absolute.idiosyncraticReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(attributionSheet.absolute.idiosyncraticReturn)}</span>.
         </p>
         <p className="mt-3 text-sm text-slate-700 leading-6">
-          For the excess sheet, the market beta is adjusted exactly as in the PDF: <span className="font-mono text-slate-900">beta_market - 1</span>. That produces an excess imputed return of <span className="font-semibold text-slate-900">{fmt.pct(attributionSheet.excess.imputedReturn)}</span> and an excess idiosyncratic return of <span className={`font-semibold ${attributionSheet.excess.idiosyncraticReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(attributionSheet.excess.idiosyncraticReturn)}</span>.
+          For the excess sheet, the market beta is adjusted to <span className="font-mono text-slate-900">beta_market - 1</span> while the style factor betas stay unchanged. That produces an excess imputed return of <span className="font-semibold text-slate-900">{fmt.pct(attributionSheet.excess.imputedReturn)}</span> and an excess idiosyncratic return of <span className={`font-semibold ${attributionSheet.excess.idiosyncraticReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(attributionSheet.excess.idiosyncraticReturn)}</span>.
         </p>
         <div className="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-3">
           <div className="rounded-lg border border-slate-200 bg-white p-3">
@@ -1980,6 +2136,7 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings, risk }) 
           sheet={attributionSheet.absolute}
           factors={absoluteSheetFactors}
           accentClass="bg-amber-50"
+          detail={absoluteSheetDetail}
         />
         <AttributionSheetTable
           title="Excess Return Attribution"
@@ -1989,6 +2146,7 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings, risk }) 
           sheet={attributionSheet.excess}
           factors={excessSheetFactors}
           accentClass="bg-blue-50"
+          detail={excessSheetDetail}
         />
       </div>}
     </div>
@@ -2217,6 +2375,7 @@ function RiskPage({ settings, risk }) {
     { factor: "Market", contribution: lastWeek.marketContrib },
     { factor: "Value", contribution: lastWeek.valueContrib },
     { factor: "Momentum", contribution: lastWeek.momentumContrib },
+    { factor: "Growth", contribution: lastWeek.growthContrib },
     { factor: "Alpha", contribution: lastWeek.alphaContrib },
     { factor: "Residual Gap", contribution: lastWeek.residualGap },
   ] : [];
@@ -2295,7 +2454,7 @@ function RiskPage({ settings, risk }) {
             </Card>
           </div>
         </> : <p className="text-sm text-slate-500">Not enough live history to calculate a weekly regression view yet.</p>}
-        {weeklyAttribution.length > 0 && <div className="mt-4"><ResponsiveContainer width="100%" height={320}><ComposedChart data={weeklyAttribution}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="marketContrib" stackId="a" fill="#1e3a5f" name="Market"/><Bar dataKey="valueContrib" stackId="a" fill="#2563eb" name="Value"/><Bar dataKey="momentumContrib" stackId="a" fill="#7c3aed" name="Momentum"/><Bar dataKey="alphaContrib" stackId="a" fill="#059669" name="Alpha"/><Bar dataKey="residualGap" stackId="a" fill="#f97316" name="Gap"/><Line type="monotone" dataKey="portfolioReturn" stroke="#0f172a" strokeWidth={2.5} name="Actual"/><Line type="monotone" dataKey="predictedReturn" stroke="#2563eb" strokeWidth={2} strokeDasharray="5 5" name="Predicted"/></ComposedChart></ResponsiveContainer></div>}
+        {weeklyAttribution.length > 0 && <div className="mt-4"><ResponsiveContainer width="100%" height={320}><ComposedChart data={weeklyAttribution}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="week" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Bar dataKey="marketContrib" stackId="a" fill="#1e3a5f" name="Market"/><Bar dataKey="valueContrib" stackId="a" fill="#2563eb" name="Value"/><Bar dataKey="momentumContrib" stackId="a" fill="#7c3aed" name="Momentum"/><Bar dataKey="growthContrib" stackId="a" fill="#0ea5e9" name="Growth"/><Bar dataKey="alphaContrib" stackId="a" fill="#059669" name="Alpha"/><Bar dataKey="residualGap" stackId="a" fill="#f97316" name="Gap"/><Line type="monotone" dataKey="portfolioReturn" stroke="#0f172a" strokeWidth={2.5} name="Actual"/><Line type="monotone" dataKey="predictedReturn" stroke="#2563eb" strokeWidth={2} strokeDasharray="5 5" name="Predicted"/></ComposedChart></ResponsiveContainer></div>}
       </Card>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-4">
