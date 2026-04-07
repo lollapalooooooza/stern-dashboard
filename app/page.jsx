@@ -438,7 +438,12 @@ function buildRiskHoldingsPayload(holdings) {
       buyPrice: holding.buyPrice,
       shares: holding.shares,
       status: holding.status,
-    }));
+    }))
+    .sort((left, right) => {
+      const leftKey = `${left.ticker}|${left.id}|${left.theme}|${left.subTheme}`;
+      const rightKey = `${right.ticker}|${right.id}|${right.theme}|${right.subTheme}`;
+      return leftKey.localeCompare(rightKey);
+    });
 }
 
 function buildRiskRequestKey(activeRiskHoldings) {
@@ -489,10 +494,13 @@ function useRiskAnalytics(group, holdings) {
     return () => { cancelled = true; };
   }, [group, activeRiskHoldings, riskRequestKey]);
 
+  const activeAnalytics = riskData?.requestKey === riskRequestKey ? riskData : null;
+
   return {
-    analytics: riskData,
+    analytics: activeAnalytics,
+    staleAnalytics: activeAnalytics ? null : riskData,
     error: riskError,
-    isLoading: activeRiskHoldings.length > 0 && !riskData && !riskError,
+    isLoading: activeRiskHoldings.length > 0 && !activeAnalytics && !riskError,
     isRefreshing: !!riskData && riskData.requestKey !== riskRequestKey,
   };
 }

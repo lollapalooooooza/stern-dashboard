@@ -401,11 +401,19 @@ export async function POST(request) {
     const factorRows = buildFactorRows(factorReturnMaps);
     const factorByDate = new Map(factorRows.map((row) => [row.date, row]));
 
-    const totalValue = activeHoldings.reduce((sum, holding) => sum + holding.shares * holding.currentPrice, 0);
-    const maxStockWeight = totalValue > 0 ? Math.max(...activeHoldings.map((holding) => (holding.shares * holding.currentPrice) / totalValue)) : 0;
-    const spyWeight = totalValue > 0 ? activeHoldings.filter((holding) => holding.ticker === "SPY").reduce((sum, holding) => sum + holding.shares * holding.currentPrice, 0) / totalValue : 0;
+    const pricedHoldings = activeHoldings.map((holding) => {
+      const livePrice = clampNumber(quotePrices[holding.ticker], 0);
+      return {
+        ...holding,
+        currentPrice: livePrice > 0 ? livePrice : holding.currentPrice,
+      };
+    });
 
-    const holdingAnalytics = activeHoldings.map((holding) => {
+    const totalValue = pricedHoldings.reduce((sum, holding) => sum + holding.shares * holding.currentPrice, 0);
+    const maxStockWeight = totalValue > 0 ? Math.max(...pricedHoldings.map((holding) => (holding.shares * holding.currentPrice) / totalValue)) : 0;
+    const spyWeight = totalValue > 0 ? pricedHoldings.filter((holding) => holding.ticker === "SPY").reduce((sum, holding) => sum + holding.shares * holding.currentPrice, 0) / totalValue : 0;
+
+    const holdingAnalytics = pricedHoldings.map((holding) => {
       const currentValue = holding.shares * holding.currentPrice;
       const weight = totalValue > 0 ? currentValue / totalValue : 0;
       const returnMap = createReturnMap(historyMap.get(holding.ticker) || []);
