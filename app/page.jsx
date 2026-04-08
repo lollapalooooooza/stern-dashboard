@@ -158,8 +158,13 @@ function parseWeekNumber(week) {
   return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
 }
 
-const WEEKLY_RETURN_CHART_START_WEEK = 4;
-const WEEKLY_RETURN_CHART_START_DATE = "2025-11-03";
+const THEMATIC_TRACKER_START_DATE = "2025-11-03";
+
+function shouldResetTrackerStart(rows) {
+  const hasStartOrAfter = rows.some((row) => row.date && row.date >= THEMATIC_TRACKER_START_DATE);
+  const hasBefore = rows.some((row) => row.date && row.date < THEMATIC_TRACKER_START_DATE);
+  return hasStartOrAfter && hasBefore;
+}
 
 function normalizeWeeklyHistoryRows(rows) {
   const cleaned = (rows || [])
@@ -190,15 +195,24 @@ function normalizeWeeklyHistoryRows(rows) {
     byKey.set(key, row);
   }
 
-  return [...byKey.values()]
+  const sorted = [...byKey.values()]
     .sort((a, b) => {
       if (a.date && b.date && a.date !== b.date) return a.date.localeCompare(b.date);
       const weekDiff = parseWeekNumber(a.week) - parseWeekNumber(b.week);
       if (weekDiff !== 0) return weekDiff;
       return a._index - b._index;
-    })
-    .map((row, index) => ({
-      week: `W${index + 1}`,
+    });
+
+  const resetToTrackerStart = shouldResetTrackerStart(sorted);
+  const trimmed = resetToTrackerStart
+    ? sorted.filter((row) => row.date && row.date >= THEMATIC_TRACKER_START_DATE)
+    : sorted;
+  const zeroIndexedWeeks = trimmed[0]?.date === THEMATIC_TRACKER_START_DATE
+    || trimmed.some((row) => parseWeekNumber(row.week) === 0);
+  const weekOffset = zeroIndexedWeeks ? 0 : 1;
+
+  return trimmed.map((row, index) => ({
+      week: `W${index + weekOffset}`,
       date: row.date,
       portfolioReturn: row.portfolioReturn,
       benchmarkReturn: row.benchmarkReturn,
@@ -207,15 +221,6 @@ function normalizeWeeklyHistoryRows(rows) {
       momentumContrib: row.momentumContrib,
       alpha: row.alpha,
     }));
-}
-
-function filterWeeklyReturnChartRows(rows) {
-  const normalized = normalizeWeeklyHistoryRows(rows);
-  const dateFiltered = normalized.filter((row) => row.date && row.date >= WEEKLY_RETURN_CHART_START_DATE);
-  if (dateFiltered.length) return dateFiltered;
-
-  const weekFiltered = normalized.filter((row) => parseWeekNumber(row.week) >= WEEKLY_RETURN_CHART_START_WEEK);
-  return weekFiltered.length ? weekFiltered : normalized;
 }
 
 function normalizeDailyHistoryRows(rows) {
@@ -240,19 +245,27 @@ function normalizeDailyHistoryRows(rows) {
   const byDate = new Map();
   for (const row of cleaned) byDate.set(row.date, row);
 
-  return [...byDate.values()]
-    .sort((a, b) => (a.date !== b.date ? a.date.localeCompare(b.date) : a._index - b._index))
-    .map((row) => ({
+  const sorted = [...byDate.values()]
+    .sort((a, b) => (a.date !== b.date ? a.date.localeCompare(b.date) : a._index - b._index));
+  const resetToTrackerStart = shouldResetTrackerStart(sorted);
+  const trimmed = resetToTrackerStart
+    ? sorted.filter((row) => row.date && row.date >= THEMATIC_TRACKER_START_DATE)
+    : sorted;
+  const trackerBaseline = trimmed[0]?.date === THEMATIC_TRACKER_START_DATE;
+  const basePortfolioValue = trackerBaseline && trimmed[0]?.portfolioValue > 0 ? trimmed[0].portfolioValue : null;
+  const baseBenchmarkValue = trackerBaseline && trimmed[0]?.benchmarkValue > 0 ? trimmed[0].benchmarkValue : null;
+
+  return trimmed.map((row) => ({
       date: row.date,
       portfolioValue: row.portfolioValue,
-      benchmarkValue: row.benchmarkValue,
+      benchmarkValue: baseBenchmarkValue ? row.benchmarkValue / baseBenchmarkValue : row.benchmarkValue,
       portfolioReturn: row.portfolioReturn,
       benchmarkReturn: row.benchmarkReturn,
       marketContrib: row.marketContrib,
       valueContrib: row.valueContrib,
       momentumContrib: row.momentumContrib,
       alpha: row.alpha,
-      sinceStart: row.sinceStart,
+      sinceStart: basePortfolioValue ? row.portfolioValue / basePortfolioValue - 1 : row.sinceStart,
     }));
 }
 
@@ -976,7 +989,7 @@ function summarizeActiveBook(computed, cashBalance, totalVal = null) {
 
 function selectReturnHistory(view, weeklyHistory, dailyHistoryRows) {
   if (view === "daily") return (dailyHistoryRows || []).slice(-20);
-  return filterWeeklyReturnChartRows(weeklyHistory);
+  return normalizeWeeklyHistoryRows(weeklyHistory);
 }
 
 function buildOverviewStatDetails(context) {
