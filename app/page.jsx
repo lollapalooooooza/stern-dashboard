@@ -158,6 +158,9 @@ function parseWeekNumber(week) {
   return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
 }
 
+const WEEKLY_RETURN_CHART_START_WEEK = 4;
+const WEEKLY_RETURN_CHART_START_DATE = "2025-11-03";
+
 function normalizeWeeklyHistoryRows(rows) {
   const cleaned = (rows || [])
     .map((row, index) => ({
@@ -204,6 +207,15 @@ function normalizeWeeklyHistoryRows(rows) {
       momentumContrib: row.momentumContrib,
       alpha: row.alpha,
     }));
+}
+
+function filterWeeklyReturnChartRows(rows) {
+  const normalized = normalizeWeeklyHistoryRows(rows);
+  const dateFiltered = normalized.filter((row) => row.date && row.date >= WEEKLY_RETURN_CHART_START_DATE);
+  if (dateFiltered.length) return dateFiltered;
+
+  const weekFiltered = normalized.filter((row) => parseWeekNumber(row.week) >= WEEKLY_RETURN_CHART_START_WEEK);
+  return weekFiltered.length ? weekFiltered : normalized;
 }
 
 function normalizeDailyHistoryRows(rows) {
@@ -964,7 +976,7 @@ function summarizeActiveBook(computed, cashBalance, totalVal = null) {
 
 function selectReturnHistory(view, weeklyHistory, dailyHistoryRows) {
   if (view === "daily") return (dailyHistoryRows || []).slice(-20);
-  return normalizeWeeklyHistoryRows(weeklyHistory);
+  return filterWeeklyReturnChartRows(weeklyHistory);
 }
 
 function buildOverviewStatDetails(context) {
@@ -1072,6 +1084,8 @@ function buildOverviewStatDetails(context) {
       daily_var_95: Number(asNumber(liveRiskMetrics.dailyVaR95).toFixed(8)),
       annualized_vol: Number(asNumber(liveRiskMetrics.annualizedVol).toFixed(8)),
       systematic_vol: Number(asNumber(liveRiskMetrics.systematicVol).toFixed(8)),
+      beta_observations: liveRiskMetrics.betaObservations || 0,
+      beta_benchmark: liveRiskMetrics.betaBenchmark || "^GSPC",
       observations: liveRiskMetrics.observations || 0,
       updated_at: liveRiskMetrics.updatedAt || null,
     } : null,
@@ -1239,27 +1253,44 @@ function buildOverviewStatDetails(context) {
       source: betaPending ? "Waiting for the live /api/risk regression so Overview matches the Risk and Report pages." : liveRiskMetrics ? "Displayed from the live /api/risk regression payload." : "Displayed from holdings-weighted adjusted beta fallback.",
       formula: [
         "display_beta = live_regression_beta if available else holdings_weighted_beta",
+        "current_weight_i = current_value_i / active_total_value",
+        "portfolio_return_t = Σ(current_weight_i × holding_return_i_t) / available_weight_t",
+        "available_weight_t = Σ(current_weight_i for holdings with a valid return on day t)",
+        "live_regression_beta = slope of OLS(portfolio_return_t ~ 1 + market_return_t) over the 5Y market window",
+        "market_return_t = ^GSPC daily return",
         "holdings_weighted_beta = Σ(weight_i × adjusted_beta_i)",
         "adjusted_beta_i = 1 + (market_beta_i - 1) × (1 - benchmark_weight_i)",
       ],
       inputs: [
+        `active_total_value = ${fmt.usdExact(investedVal)}`,
+        `active_positions = ${computed.length}`,
         `live_regression_beta = ${liveRiskMetrics ? fmt.num(liveRiskMetrics.portfolioBeta, 4) : "not available"}`,
         `fallback_holdings_beta = ${fmt.num(localPortBeta, 4)}`,
-        `observations = ${liveRiskMetrics?.observations || 0}`,
+        `beta_observations = ${liveRiskMetrics?.betaObservations || 0}`,
+        `beta_benchmark = ${liveRiskMetrics?.betaBenchmark || "^GSPC"}`,
       ],
       calculation: [
+        liveRiskMetrics ? `portfolio_return_t is rebuilt each day from live holdings weights across ${liveRiskMetrics.betaObservations || 0} aligned observations` : "portfolio_return_t could not be rebuilt from live returns, so the card falls back to holdings-weighted beta",
+        liveRiskMetrics ? "days with partial price history are renormalized by available_weight_t instead of treating missing holdings as zero return" : "fallback path skips the live return-series regression",
+        liveRiskMetrics ? `live_regression_beta = beta(portfolio_return_t, ${(liveRiskMetrics?.betaBenchmark || "^GSPC")}_return_t) = ${fmt.num(displayBeta, 4)}` : "live_regression_beta = not available",
         betaPending ? "display_beta = wait for live_regression_beta before rendering a final value" : liveRiskMetrics ? `display_beta = live_regression_beta = ${fmt.num(displayBeta, 4)}` : `display_beta = fallback_holdings_beta = ${fmt.num(displayBeta, 4)}`,
         `fallback_holdings_beta = ${fmt.num(localPortBeta, 4)}`,
       ],
-      notes: betaContributors,
+      notes: [
+        "Method choice: use the uploaded Python script's standard 5Y market-beta concept as the primary displayed beta.",
+        "Implementation difference vs the uploaded Python file: the app renormalizes missing-history days so newer holdings do not shrink the early portfolio return series.",
+        "The shorter multi-factor model is still used for attribution on the Risk page, but it does not override the Overview beta.",
+        ...betaContributors,
+      ],
       pythonFileName: "overview_portfolio_beta_check.py",
       pythonSource: buildPythonScript("Verify Overview portfolio beta display and fallback holdings beta", sharedPayload, [
         'def adjusted_beta(row):',
         '    return 1 + (row["market_beta"] - 1) * (1 - row["benchmark_weight"])',
         'fallback_holdings_beta = fsum(row["weight"] * adjusted_beta(row) for row in data["active_holdings"])',
         'live_regression_beta = None if data["live_risk_metrics"] is None else data["live_risk_metrics"]["portfolio_beta"]',
+        'beta_observations = 0 if data["live_risk_metrics"] is None else data["live_risk_metrics"]["beta_observations"]',
         'display_beta = live_regression_beta if live_regression_beta is not None else fallback_holdings_beta',
-        'print({"display_beta": round(display_beta, 6), "live_regression_beta": None if live_regression_beta is None else round(live_regression_beta, 6), "fallback_holdings_beta": round(fallback_holdings_beta, 6)})',
+        'print({"display_beta": round(display_beta, 6), "live_regression_beta": None if live_regression_beta is None else round(live_regression_beta, 6), "fallback_holdings_beta": round(fallback_holdings_beta, 6), "beta_observations": beta_observations})',
       ]),
     },
     trackingError: {
@@ -1423,7 +1454,9 @@ function buildRiskStatDetails(analytics) {
 
   const holdingExposures = Array.isArray(analytics?.holdingExposures) ? analytics.holdingExposures : [];
   const dailySeries = Array.isArray(analytics?.dailySeries) ? analytics.dailySeries : [];
+  const betaSeries = Array.isArray(analytics?.betaSeries) ? analytics.betaSeries : [];
   const observations = metrics.observations || dailySeries.length || 0;
+  const betaObservations = metrics.betaObservations || betaSeries.length || observations;
   const annualizedVol = asNumber(metrics.annualizedVol);
   const topBetaContributors = [...holdingExposures]
     .sort((a, b) => Math.abs((asNumber(b.weight) || 0) * (asNumber(b.marketBeta) || 0)) - Math.abs((asNumber(a.weight) || 0) * (asNumber(a.marketBeta) || 0)))
@@ -1446,6 +1479,8 @@ function buildRiskStatDetails(analytics) {
       total_value: Number(asNumber(metrics.totalValue).toFixed(6)),
       spy_weight: Number(asNumber(metrics.spyWeight).toFixed(8)),
       active_count: metrics.activeCount || holdingExposures.length,
+      beta_observations: betaObservations,
+      beta_benchmark: metrics.betaBenchmark || "^GSPC",
       observations,
     },
     holding_exposures: holdingExposures.map((holding) => ({
@@ -1454,6 +1489,11 @@ function buildRiskStatDetails(analytics) {
       current_value: Number(asNumber(holding.currentValue).toFixed(6)),
       weight: Number(asNumber(holding.weight).toFixed(8)),
       market_beta: Number(asNumber(holding.marketBeta).toFixed(8)),
+    })),
+    beta_series: betaSeries.map((row) => ({
+      date: row.date,
+      portfolio_return: Number(asNumber(row.portfolioReturn).toFixed(8)),
+      market_return: Number(asNumber(row.marketReturn).toFixed(8)),
     })),
     daily_series: dailySeries.map((row) => ({
       date: row.date,
@@ -1468,20 +1508,21 @@ function buildRiskStatDetails(analytics) {
       sectionLabel: "Risk Formula",
       title: "Portfolio Beta",
       displayedValue: fmt.num(metrics.portfolioBeta),
-      displayedSub: `${observations}d live regression`,
-      source: "Displayed from the live /api/risk regression after repricing active holdings with Yahoo quotes.",
+      displayedSub: `${betaObservations}d 5Y market regression`,
+      source: "Displayed from the live /api/risk beta regression built from reconstructed portfolio returns versus the S&P 500 market benchmark.",
       formula: [
-        "holding_weight_i = current_value_i / total_active_value",
-        "portfolio_beta = Σ(holding_weight_i × market_beta_i)",
+        "portfolio_return_t = Σ(current_weight_i × holding_return_i_t) / available_weight_t",
+        "portfolio_beta = Cov(portfolio_return_t, market_return_t) / Var(market_return_t)",
       ],
       inputs: [
         `active_total_value = ${fmt.usdExact(metrics.totalValue)}`,
         `active_positions = ${metrics.activeCount}`,
-        `observations = ${observations}`,
+        `beta_observations = ${betaObservations}`,
+        `beta_benchmark = ${metrics.betaBenchmark || "^GSPC"}`,
         `SPY_weight = ${fmt.pct(metrics.spyWeight)}`,
       ],
       calculation: [
-        `portfolio_beta = Σ(weight_i × market_beta_i) = ${fmt.num(metrics.portfolioBeta, 4)}`,
+        `portfolio_beta = regression_beta(portfolio_return, ${metrics.betaBenchmark || "^GSPC"}_return) = ${fmt.num(metrics.portfolioBeta, 4)}`,
         `value_beta = ${fmt.num(metrics.valueBeta, 4)}, momentum_beta = ${fmt.num(metrics.momentumBeta, 4)}, growth_beta = ${fmt.num(metrics.growthBeta, 4)}`,
       ],
       notes: [
@@ -1490,10 +1531,16 @@ function buildRiskStatDetails(analytics) {
         ...topBetaContributors,
       ],
       pythonFileName: "risk_portfolio_beta_check.py",
-      pythonSource: buildPythonScript("Recompute Risk tab portfolio beta from holding weights and market betas", payload, [
-        'total_active_value = fsum(row["current_value"] for row in data["holding_exposures"])',
-        'portfolio_beta = fsum((row["current_value"] / total_active_value) * row["market_beta"] for row in data["holding_exposures"]) if total_active_value else 0.0',
-        'print({"total_active_value": round(total_active_value, 2), "portfolio_beta": round(portfolio_beta, 6)})',
+      pythonSource: buildPythonScript("Recompute Risk tab portfolio beta from the exported beta series", payload, [
+        'series = data["beta_series"]',
+        'market = [row["market_return"] for row in series]',
+        'portfolio = [row["portfolio_return"] for row in series]',
+        'market_mean = fsum(market) / len(market) if market else 0.0',
+        'portfolio_mean = fsum(portfolio) / len(portfolio) if portfolio else 0.0',
+        'covariance = fsum((m - market_mean) * (p - portfolio_mean) for p, m in zip(portfolio, market))',
+        'variance = fsum((m - market_mean) ** 2 for m in market)',
+        'portfolio_beta = covariance / variance if variance else None',
+        'print({"observations": len(series), "portfolio_beta": None if portfolio_beta is None else round(portfolio_beta, 6)})',
       ]),
     },
     trackingError: {
@@ -1701,7 +1748,7 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk })
   const displayDailyVaR95 = liveRiskMetrics?.dailyVaR95 ?? calc.dailyVaR95(settings.portfolioVol);
   const displayAnnualizedVol = liveRiskMetrics?.annualizedVol ?? settings.portfolioVol;
   const displaySystematicVol = liveRiskMetrics?.systematicVol ?? localSysVol;
-  const betaStatus = risk?.isLoading ? "Loading live regression..." : risk?.isRefreshing ? "Refreshing live regression..." : liveRiskMetrics ? `${liveRiskMetrics.observations}d live regression` : risk?.error ? "Risk analytics unavailable" : "Holdings-weighted fallback";
+  const betaStatus = risk?.isLoading ? "Loading 5Y market regression..." : risk?.isRefreshing ? "Refreshing 5Y market regression..." : liveRiskMetrics ? `${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}d 5Y market regression` : risk?.error ? "Risk analytics unavailable" : "Holdings-weighted fallback";
   const allocationLegend = [...bookSummary.portfolioAllocation].sort((a,b)=>b.value-a.value);
   const cumData = buildCumulativeReturnSeries(analysisHistory).map((row, index) => ({ ...row, label: returnView === "daily" ? fmt.shortDate(analysisHistory[index]?.date) : analysisHistory[index]?.week }));
   const pnlSorted = [...stocksOnly].sort((a,b)=>b.pnlDollar-a.pnlDollar);
@@ -1751,7 +1798,7 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk })
       <StatCard label="Total Return" value={fmt.usdExact(displayTotalReturnDollar)} sub={fmt.pct(displayTotalReturnPct)} trend={displayTotalReturnDollar >= 0 ? "up" : "down"} color={displayTotalReturnDollar >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Realized + unrealized PnL: ${fmt.usdExact(totalPnl)}\nMeasured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}${portfolioStartValue != null ? `\nInitial tracked balance: ${fmt.usdExact(portfolioStartValue)}` : ""}${latestTrackedBalance ? `\nLatest tracked balance: ${fmt.usdExact(latestTrackedBalance.portfolioValue)}` : ""}`} detail={overviewDetails.totalReturn} />
       <StatCard label="Unrealized PnL" value={fmt.usdExact(totalUnrealizedPnl)} sub={fmt.pct(unrealizedPnlPct)} trend={totalUnrealizedPnl >= 0 ? "up" : "down"} color={totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from active holdings\nCost basis: ${fmt.usdExact(activeCostBasis)}\nCurrent active value: ${fmt.usdExact(investedVal)}\nPercent is measured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}`} detail={overviewDetails.unrealizedPnl} />
       <StatCard label="Realized PnL" value={fmt.usdExact(totalRealizedPnl)} sub={fmt.pct(realizedPnlPct)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usdExact(realizedCostBasis)}\nPercent is measured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}`} detail={overviewDetails.realizedPnl} />
-      <StatCard label="Portfolio Beta" value={displayBeta == null ? "—" : fmt.num(displayBeta)} sub={betaStatus} icon={Shield} tooltip={betaPending ? "Waiting for live regression to finish before showing the final beta." : liveRiskMetrics ? `Live regression beta versus SPY using Yahoo daily history.\nObservations: ${liveRiskMetrics.observations}` : "Fallback to holdings-weighted beta because live regression is not available."} detail={overviewDetails.portfolioBeta}/>
+      <StatCard label="Portfolio Beta" value={displayBeta == null ? "—" : fmt.num(displayBeta)} sub={betaStatus} icon={Shield} tooltip={betaPending ? "Waiting for the 5Y market regression to finish before showing the final beta." : liveRiskMetrics ? `5Y portfolio beta versus ${liveRiskMetrics.betaBenchmark || "^GSPC"} built from reconstructed holdings returns.\nObservations: ${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}` : "Fallback to holdings-weighted beta because live regression is not available."} detail={overviewDetails.portfolioBeta}/>
       <StatCard label="Tracking Error" value={fmt.pct(displayTrackingError)} icon={Activity} detail={overviewDetails.trackingError}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(displayDailyVaR95)} icon={AlertTriangle} detail={overviewDetails.dailyVar95}/>
       <StatCard label="Active" value={computed.length} icon={Briefcase} sub={`${exited.length} exited`} detail={overviewDetails.active}/>
@@ -2620,7 +2667,7 @@ function RiskPage({ settings, risk }) {
   const worstWeek = weeklyAttribution.reduce((worst, row) => (!worst || row.portfolioReturn < worst.portfolioReturn ? row : worst), null);
 
   return <div className="space-y-6">
-    <SectionHeader title="Risk Analytics" subtitle={metrics ? `Live Yahoo regression · ${metrics.observations} daily observations` : "Live Yahoo regression"}>
+    <SectionHeader title="Risk Analytics" subtitle={metrics ? `5Y beta regression (${metrics.betaObservations || 0}d) · factor model (${metrics.observations}d)` : "Live Yahoo regression"}>
       <div className="flex items-center gap-2">
         {analytics?.updatedAt && <span className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-1 rounded">Updated {fmt.date(analytics.updatedAt)}</span>}
         {isRefreshing && <span className="text-[10px] text-blue-600 bg-blue-50 px-2 py-1 rounded">Refreshing live data...</span>}
@@ -2806,7 +2853,7 @@ function TeamReportPage({ holdings, settings, report, setReport, reportMeta, set
       </div>
     </SectionHeader>
     <Card className="p-6"><div className="border-b-2 border-slate-800 pb-4 mb-4 text-center"><h1 className="text-xl font-bold text-slate-800">NYU Stern MIF</h1><p className="text-sm text-slate-500 mt-1">{new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}</p></div>
-      <div className="grid grid-cols-4 gap-4 text-center">{[{l:"Value",v:fmt.usd(totalVal)},{l:"β",v:reportBeta == null ? "—" : fmt.num(reportBeta),sub:betaPending?"Loading live regression...":liveRiskMetrics?`${liveRiskMetrics.observations}d live regression`:"Holdings-weighted fallback"},{l:"Active",v:computed.length},{l:"Realized PnL",v:fmt.usd(totalRealizedPnl)}].map(s=><div key={s.l} className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-500">{s.l}</p><p className="text-lg font-bold text-slate-800">{s.v}</p>{s.sub?<p className="mt-1 text-[10px] text-slate-500">{s.sub}</p>:null}</div>)}</div></Card>
+      <div className="grid grid-cols-4 gap-4 text-center">{[{l:"Value",v:fmt.usd(totalVal)},{l:"β",v:reportBeta == null ? "—" : fmt.num(reportBeta),sub:betaPending?"Loading 5Y market regression...":liveRiskMetrics?`${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}d 5Y market regression`:"Holdings-weighted fallback"},{l:"Active",v:computed.length},{l:"Realized PnL",v:fmt.usd(totalRealizedPnl)}].map(s=><div key={s.l} className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-500">{s.l}</p><p className="text-lg font-bold text-slate-800">{s.v}</p>{s.sub?<p className="mt-1 text-[10px] text-slate-500">{s.sub}</p>:null}</div>)}</div></Card>
     <Card className="p-5"><h3 className="text-sm font-semibold text-slate-700 mb-3">Upload Document</h3>
       {upEdit?<div><input ref={fr} type="file" accept=".pdf,.doc,.docx" onChange={onFile} className="hidden"/><button onClick={()=>fr.current?.click()} className="flex items-center gap-2 px-4 py-3 border-2 border-dashed rounded-lg text-sm text-slate-600 hover:border-blue-400 w-full justify-center"><Upload size={18}/> Upload PDF / DOCX</button>
         {uf && <div className="mt-3 flex items-center gap-2"><div className="flex-1 p-2.5 bg-slate-50 rounded-lg flex items-center gap-2"><FileText size={16} className="text-blue-500"/><span className="text-sm font-medium truncate">{uf.name}</span></div><button onClick={()=>setUE(false)} className="px-3 py-2 bg-emerald-600 text-white text-xs rounded-md"><Save size={12}/></button></div>}

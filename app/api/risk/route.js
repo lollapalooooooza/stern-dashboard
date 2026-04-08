@@ -1,8 +1,10 @@
-const HISTORY_RANGE = "6mo";
+const HISTORY_RANGE = "5y";
 const HISTORY_INTERVAL = "1d";
 const HISTORY_CACHE_TTL_MS = 15 * 60 * 1000;
 const MIN_MULTI_FACTOR_OBS = 45;
 const MIN_MARKET_ONLY_OBS = 15;
+const FACTOR_WINDOW_OBS = 126;
+const BETA_MARKET_SYMBOL = "^GSPC";
 const FACTOR_SYMBOLS = ["SPY", "IVE", "MTUM", "IVW"];
 
 const historyCache = new Map();
@@ -248,6 +250,35 @@ function buildFactorRows(factorReturnMaps) {
   }));
 }
 
+function buildWeightedReturnSeries(holdings, returnMapByTicker, marketReturnMap, weightByTicker) {
+  const rows = [];
+  const dates = [...marketReturnMap.keys()].sort();
+
+  for (const date of dates) {
+    let weightedReturn = 0;
+    let availableWeight = 0;
+
+    for (const holding of holdings) {
+      const weight = weightByTicker.get(holding.ticker) || 0;
+      const returnMap = returnMapByTicker.get(holding.ticker);
+      const assetReturn = returnMap?.get(date);
+      if (!Number.isFinite(assetReturn) || weight <= 0) continue;
+      weightedReturn += weight * assetReturn;
+      availableWeight += weight;
+    }
+
+    if (availableWeight <= 0) continue;
+    rows.push({
+      date,
+      assetReturn: weightedReturn / availableWeight,
+      marketReturn: marketReturnMap.get(date),
+      availableWeight,
+    });
+  }
+
+  return rows;
+}
+
 function bucketByWeek(rows) {
   const buckets = new Map();
   for (const row of rows) {
@@ -447,10 +478,11 @@ export async function POST(request) {
         drawdownSummary: [],
         holdingExposures: [],
         dailySeries: [],
+        betaSeries: [],
       });
     }
 
-    const symbols = [...new Set([...activeHoldings.map((holding) => holding.ticker), ...FACTOR_SYMBOLS])];
+    const symbols = [...new Set([...activeHoldings.map((holding) => holding.ticker), BETA_MARKET_SYMBOL, ...FACTOR_SYMBOLS])];
     const quotePrices = await fetchYahooQuotes(symbols);
 
     const histories = await mapWithConcurrency(symbols, 8, async (symbol) => {
@@ -467,11 +499,13 @@ export async function POST(request) {
       MTUM: historyMap.get("MTUM") || [],
       IVW: historyMap.get("IVW") || [],
     };
+    const betaBenchmarkSeries = historyMap.get(BETA_MARKET_SYMBOL) || [];
 
     const spyReturns = createReturnMap(factorPriceSeries.SPY);
     const iveReturns = createReturnMap(factorPriceSeries.IVE);
     const mtumReturns = createReturnMap(factorPriceSeries.MTUM);
     const ivwReturns = createReturnMap(factorPriceSeries.IVW);
+    const betaMarketReturns = createReturnMap(betaBenchmarkSeries);
     const factorReturnMaps = {
       market: spyReturns,
       value: new Map(),
@@ -486,7 +520,7 @@ export async function POST(request) {
     }
 
     const factorRows = buildFactorRows(factorReturnMaps);
-    const factorByDate = new Map(factorRows.map((row) => [row.date, row]));
+    const factorModelRows = factorRows.slice(-FACTOR_WINDOW_OBS);
 
     const pricedHoldings = activeHoldings.map((holding) => {
       const livePrice = clampNumber(quotePrices[holding.ticker], 0);
@@ -499,14 +533,23 @@ export async function POST(request) {
     const totalValue = pricedHoldings.reduce((sum, holding) => sum + holding.shares * holding.currentPrice, 0);
     const maxStockWeight = totalValue > 0 ? Math.max(...pricedHoldings.map((holding) => (holding.shares * holding.currentPrice) / totalValue)) : 0;
     const spyWeight = totalValue > 0 ? pricedHoldings.filter((holding) => holding.ticker === "SPY").reduce((sum, holding) => sum + holding.shares * holding.currentPrice, 0) / totalValue : 0;
+    const weightByTicker = new Map(pricedHoldings.map((holding) => [holding.ticker, totalValue > 0 ? (holding.shares * holding.currentPrice) / totalValue : 0]));
+    const holdingReturnMaps = new Map(pricedHoldings.map((holding) => [holding.ticker, createReturnMap(historyMap.get(holding.ticker) || [])]));
 
     const holdingAnalytics = pricedHoldings.map((holding) => {
       const currentValue = holding.shares * holding.currentPrice;
-      const weight = totalValue > 0 ? currentValue / totalValue : 0;
-      const returnMap = createReturnMap(historyMap.get(holding.ticker) || []);
-      const alignedDates = factorRows.filter((row) => returnMap.has(row.date));
+      const weight = weightByTicker.get(holding.ticker) || 0;
+      const returnMap = holdingReturnMaps.get(holding.ticker) || new Map();
+      const betaDates = [...betaMarketReturns.keys()].filter((date) => returnMap.has(date));
+      const betaReturns = betaDates.map((date) => returnMap.get(date));
+      const alignedDates = factorModelRows.filter((row) => returnMap.has(row.date));
       const y = alignedDates.map((row) => returnMap.get(row.date));
       const x = alignedDates.map((row) => [row.market, row.value, row.momentum, row.growth]);
+
+      let betaRegression = null;
+      if (betaReturns.length >= MIN_MARKET_ONLY_OBS) {
+        betaRegression = runRegression(betaReturns, betaDates.map((date) => [betaMarketReturns.get(date)]), 1);
+      }
 
       let regression = null;
       if (y.length >= MIN_MULTI_FACTOR_OBS) {
@@ -532,12 +575,14 @@ export async function POST(request) {
           observations: y.length,
         };
       }
+      const factorMarketBeta = regression.factors[0] || 0;
+      const marketBeta = Number.isFinite(betaRegression?.factors?.[0]) ? betaRegression.factors[0] : factorMarketBeta;
 
       const daily = new Map();
       for (let index = 0; index < alignedDates.length; index += 1) {
         const factor = alignedDates[index];
         const actualReturn = y[index];
-        const marketContrib = regression.factors[0] * factor.market;
+        const marketContrib = factorMarketBeta * factor.market;
         const valueContrib = regression.factors[1] * factor.value;
         const momentumContrib = regression.factors[2] * factor.momentum;
         const growthContrib = regression.factors[3] * factor.growth;
@@ -558,16 +603,23 @@ export async function POST(request) {
         ...holding,
         currentValue,
         weight,
-        marketBeta: regression.factors[0] || 0,
+        marketBeta,
+        factorMarketBeta,
         valueBeta: regression.factors[1] || 0,
         momentumBeta: regression.factors[2] || 0,
         growthBeta: regression.factors[3] || 0,
         alphaDaily: regression.alpha || 0,
         rSquared: regression.rSquared || 0,
         observations: regression.observations || 0,
+        betaObservations: betaRegression?.observations || betaReturns.length,
         daily,
       };
     });
+
+    const betaSeriesRows = buildWeightedReturnSeries(pricedHoldings, holdingReturnMaps, betaMarketReturns, weightByTicker);
+    const portfolioBetaRegression = betaSeriesRows.length >= MIN_MARKET_ONLY_OBS
+      ? runRegression(betaSeriesRows.map((row) => row.assetReturn), betaSeriesRows.map((row) => [row.marketReturn]), 1)
+      : null;
 
     const portfolioDaily = [];
     for (const factor of factorRows) {
@@ -617,6 +669,7 @@ export async function POST(request) {
         drawdownSummary: [],
         holdingExposures: [],
         dailySeries: [],
+        betaSeries: [],
         updatedAt: new Date().toISOString(),
       });
     }
@@ -627,7 +680,9 @@ export async function POST(request) {
     const predictedVol = stdDev(portfolioPredicted) * Math.sqrt(252);
     const residualVol = stdDev(portfolioDaily.map((row) => row.residualGap)) * Math.sqrt(252);
     const trackingError = stdDev(portfolioDaily.map((row) => row.actualReturn - row.marketFactor)) * Math.sqrt(252);
-    const portfolioBeta = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.marketBeta, 0);
+    const portfolioBeta = Number.isFinite(portfolioBetaRegression?.factors?.[0])
+      ? portfolioBetaRegression.factors[0]
+      : holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.marketBeta, 0);
     const portfolioValueBeta = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.valueBeta, 0);
     const portfolioMomentumBeta = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.momentumBeta, 0);
     const portfolioGrowthBeta = holdingAnalytics.reduce((sum, holding) => sum + holding.weight * holding.growthBeta, 0);
@@ -643,21 +698,31 @@ export async function POST(request) {
       if (!themeMap[key]) {
         themeMap[key] = {
           theme: key,
+          holdings: [],
           weight: 0,
-          betaExposure: 0,
         };
       }
+      themeMap[key].holdings.push(holding);
       themeMap[key].weight += holding.weight;
-      themeMap[key].betaExposure += holding.weight * holding.marketBeta;
     }
     const themeRisk = Object.values(themeMap)
-      .map((row) => ({
-        theme: row.theme,
-        weight: row.weight,
-        avgBeta: row.weight > 0 ? row.betaExposure / row.weight : 0,
-        riskContrib: portfolioBeta !== 0 ? row.betaExposure / portfolioBeta : 0,
-        weightedRisk: row.weight > 0 && portfolioBeta !== 0 ? (row.betaExposure / portfolioBeta) / row.weight : 0,
-      }))
+      .map((row) => {
+        const themeSeriesRows = buildWeightedReturnSeries(row.holdings, holdingReturnMaps, betaMarketReturns, weightByTicker);
+        const themeRegression = themeSeriesRows.length >= MIN_MARKET_ONLY_OBS
+          ? runRegression(themeSeriesRows.map((item) => item.assetReturn), themeSeriesRows.map((item) => [item.marketReturn]), 1)
+          : null;
+        const avgBeta = Number.isFinite(themeRegression?.factors?.[0])
+          ? themeRegression.factors[0]
+          : (row.weight > 0 ? row.holdings.reduce((sum, holding) => sum + holding.weight * holding.marketBeta, 0) / row.weight : 0);
+        const betaExposure = row.weight * avgBeta;
+        return {
+          theme: row.theme,
+          weight: row.weight,
+          avgBeta,
+          riskContrib: portfolioBeta !== 0 ? betaExposure / portfolioBeta : 0,
+          weightedRisk: portfolioBeta !== 0 ? avgBeta / portfolioBeta : 0,
+        };
+      })
       .sort((a, b) => b.weight - a.weight);
 
     const weeklyAttribution = bucketByWeek(portfolioDaily).slice(-16);
@@ -692,11 +757,13 @@ export async function POST(request) {
       currentValue: holding.currentValue,
       weight: holding.weight,
       marketBeta: holding.marketBeta,
+      factorMarketBeta: holding.factorMarketBeta,
       valueBeta: holding.valueBeta,
       momentumBeta: holding.momentumBeta,
       growthBeta: holding.growthBeta,
       alphaDaily: holding.alphaDaily,
       observations: holding.observations,
+      betaObservations: holding.betaObservations,
     }));
     const dailySeries = portfolioDaily.map((row) => ({
       date: row.date,
@@ -708,11 +775,19 @@ export async function POST(request) {
       growthFactor: row.growthFactor,
       residualGap: row.residualGap,
     }));
+    const betaSeries = betaSeriesRows.map((row) => ({
+      date: row.date,
+      portfolioReturn: row.assetReturn,
+      marketReturn: row.marketReturn,
+      availableWeight: row.availableWeight,
+    }));
 
     return Response.json({
       updatedAt: new Date().toISOString(),
       metrics: {
         portfolioBeta,
+        betaObservations: portfolioBetaRegression?.observations || betaSeriesRows.length,
+        betaBenchmark: BETA_MARKET_SYMBOL,
         valueBeta: portfolioValueBeta,
         momentumBeta: portfolioMomentumBeta,
         growthBeta: portfolioGrowthBeta,
@@ -741,6 +816,7 @@ export async function POST(request) {
       drawdownSummary,
       holdingExposures,
       dailySeries,
+      betaSeries,
     });
   } catch (error) {
     return Response.json({ error: error.message }, { status: 500 });
