@@ -1028,6 +1028,7 @@ function buildOverviewStatDetails(context) {
     latestTrackerDateLabel,
     portfolioStartValue,
     previousTotalVal,
+    activeStockCount,
   } = context;
 
   const activePayload = computed.map((holding) => ({
@@ -1076,7 +1077,7 @@ function buildOverviewStatDetails(context) {
     book_summary: {
       stock_value: Number(bookSummary.stockValue.toFixed(6)),
       benchmark_value: Number(bookSummary.benchmarkValue.toFixed(6)),
-      active_count: computed.length,
+      active_count: activeStockCount,
       exited_count: exited.length,
       stock_theme_count: bookSummary.stockThemeCount,
     },
@@ -1124,7 +1125,7 @@ function buildOverviewStatDetails(context) {
         `stock_holdings = ${fmt.usdExact(bookSummary.stockValue)}`,
         `benchmark = ${fmt.usdExact(bookSummary.benchmarkValue)}`,
         `cash = ${fmt.usdExact(cashBalance)}`,
-        `active_positions = ${computed.length}`,
+        `active_stock_positions = ${activeStockCount}`,
       ],
       calculation: [
         `portfolio_value = ${fmt.usdExact(bookSummary.stockValue)} + ${fmt.usdExact(bookSummary.benchmarkValue)} + ${fmt.usdExact(cashBalance)}`,
@@ -1276,7 +1277,7 @@ function buildOverviewStatDetails(context) {
       ],
       inputs: [
         `active_total_value = ${fmt.usdExact(investedVal)}`,
-        `active_positions = ${computed.length}`,
+        `active_positions = ${activeStockCount}`,
         `live_regression_beta = ${liveRiskMetrics ? fmt.num(liveRiskMetrics.portfolioBeta, 4) : "not available"}`,
         `fallback_holdings_beta = ${fmt.num(localPortBeta, 4)}`,
         `beta_observations = ${liveRiskMetrics?.betaObservations || 0}`,
@@ -1364,25 +1365,25 @@ function buildOverviewStatDetails(context) {
     },
     active: {
       title: "Active Positions",
-      displayedValue: String(computed.length),
+      displayedValue: String(activeStockCount),
       displayedSub: `${exited.length} exited`,
-      source: "Displayed from current holdings status flags.",
+      source: "Displayed from current holdings status flags, excluding the benchmark row.",
       formula: [
-        "active_positions = count(holding.status == 'active')",
+        "active_positions = count(holding.status == 'active' and theme != 'Benchmark')",
         "exited_positions = count(holding.status == 'exited')",
       ],
       inputs: [
-        `active_positions = ${computed.length}`,
+        `active_positions = ${activeStockCount}`,
         `exited_positions = ${exited.length}`,
       ],
       calculation: [
-        `active_positions = ${computed.length}`,
+        `active_positions = ${activeStockCount}`,
         `exited_positions = ${exited.length}`,
       ],
       notes: themeCounts,
       pythonFileName: "overview_active_positions_check.py",
       pythonSource: buildPythonScript("Count active and exited positions for the Overview card", sharedPayload, [
-        'active_positions = len(data["active_holdings"])',
+        'active_positions = len([row for row in data["active_holdings"] if row["theme"] != "Benchmark"])',
         'exited_positions = len(data["exited_holdings"])',
         'print({"active_positions": active_positions, "exited_positions": exited_positions})',
       ]),
@@ -1767,6 +1768,7 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk })
   const pnlSorted = [...stocksOnly].sort((a,b)=>b.pnlDollar-a.pnlDollar);
   const pnlChart = [...pnlSorted.slice(0,5),...pnlSorted.slice(-5)];
   const tickers = stocksOnly.map(h=>h.ticker);
+  const activeStockCount = stocksOnly.length;
   const overviewDetails = buildOverviewStatDetails({
     totalVal,
     cashBalance,
@@ -1802,6 +1804,7 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk })
     latestTrackerDateLabel: latestTrackedBalance ? fmt.shortDate(latestTrackedBalance.date) : "",
     portfolioStartValue,
     previousTotalVal,
+    activeStockCount,
   });
 
   return <div className="space-y-6">
@@ -1814,7 +1817,7 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk })
       <StatCard label="Portfolio Beta" value={displayBeta == null ? "—" : fmt.num(displayBeta)} sub={betaStatus} icon={Shield} tooltip={betaPending ? "Waiting for the 5Y market regression to finish before showing the final beta." : liveRiskMetrics ? `5Y portfolio beta versus ${liveRiskMetrics.betaBenchmark || "^GSPC"} built from reconstructed holdings returns.\nObservations: ${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}` : "Fallback to holdings-weighted beta because live regression is not available."} detail={overviewDetails.portfolioBeta}/>
       <StatCard label="Tracking Error" value={fmt.pct(displayTrackingError)} icon={Activity} detail={overviewDetails.trackingError}/>
       <StatCard label="Daily VaR 95%" value={fmt.pct(displayDailyVaR95)} icon={AlertTriangle} detail={overviewDetails.dailyVar95}/>
-      <StatCard label="Active" value={computed.length} icon={Briefcase} sub={`${exited.length} exited`} detail={overviewDetails.active}/>
+      <StatCard label="Active" value={activeStockCount} icon={Briefcase} sub={`${exited.length} exited`} detail={overviewDetails.active}/>
       <StatCard label="Themes" value={bookSummary.stockThemeCount} icon={BarChart3} detail={overviewDetails.themes}/>
       <StatCard label="Ann. Vol" value={fmt.pct(displayAnnualizedVol)} detail={overviewDetails.annualizedVol}/>
       <StatCard label="Systematic Vol" value={fmt.pct(displaySystematicVol)} detail={overviewDetails.systematicVol}/>
@@ -1915,7 +1918,7 @@ function HoldingsPage({ holdings, setHoldings, settings, setSettings, dailyHisto
   const editableFields=["ticker","company","theme","buyPrice","currentPrice","shares","stopLossPct","marketBeta","status","entryDate","exitDate","notes"];
   const numericFields=["buyPrice","currentPrice","shares","stopLossPct","marketBeta"];
 
-  const activeCount = active.length;
+  const activeCount = active.filter((holding) => holding.theme !== "Benchmark").length;
   const exitedCount = exited.length;
   const benchmarkTotal = bookSummary.benchmarkValue;
   const stockTotal = bookSummary.stockValue;
@@ -1999,7 +2002,7 @@ function HoldingsPage({ holdings, setHoldings, settings, setSettings, dailyHisto
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Portfolio Total</p>
           <p className="mt-1 text-lg font-bold text-slate-800">{fmt.usdExact(portfolioTotal)}</p>
-          <p className="text-xs text-slate-500">{activeCount} active holdings + {fmt.usdExact(cashBalance)} cash</p>
+          <p className="text-xs text-slate-500">{activeCount} active stock holdings + {fmt.usdExact(cashBalance)} cash</p>
           {latestTrackedBalance && <p className="mt-1 text-xs text-slate-500">Tracker {fmt.shortDate(latestTrackedBalance.date)}: {fmt.usdExact(latestTrackedBalance.portfolioValue)}{Math.abs(liveToTrackerGap || 0) > 0.005 ? ` · Live gap ${fmt.usdExact(liveToTrackerGap)}` : ""}</p>}
         </div>
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
@@ -2866,7 +2869,7 @@ function TeamReportPage({ holdings, settings, report, setReport, reportMeta, set
       </div>
     </SectionHeader>
     <Card className="p-6"><div className="border-b-2 border-slate-800 pb-4 mb-4 text-center"><h1 className="text-xl font-bold text-slate-800">NYU Stern MIF</h1><p className="text-sm text-slate-500 mt-1">{new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}</p></div>
-      <div className="grid grid-cols-4 gap-4 text-center">{[{l:"Value",v:fmt.usd(totalVal)},{l:"β",v:reportBeta == null ? "—" : fmt.num(reportBeta),sub:betaPending?"Loading 5Y market regression...":liveRiskMetrics?`${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}d 5Y market regression`:"Holdings-weighted fallback"},{l:"Active",v:computed.length},{l:"Realized PnL",v:fmt.usd(totalRealizedPnl)}].map(s=><div key={s.l} className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-500">{s.l}</p><p className="text-lg font-bold text-slate-800">{s.v}</p>{s.sub?<p className="mt-1 text-[10px] text-slate-500">{s.sub}</p>:null}</div>)}</div></Card>
+      <div className="grid grid-cols-4 gap-4 text-center">{[{l:"Value",v:fmt.usd(totalVal)},{l:"β",v:reportBeta == null ? "—" : fmt.num(reportBeta),sub:betaPending?"Loading 5Y market regression...":liveRiskMetrics?`${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}d 5Y market regression`:"Holdings-weighted fallback"},{l:"Active",v:computed.filter((holding)=>holding.theme!=="Benchmark").length},{l:"Realized PnL",v:fmt.usd(totalRealizedPnl)}].map(s=><div key={s.l} className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-500">{s.l}</p><p className="text-lg font-bold text-slate-800">{s.v}</p>{s.sub?<p className="mt-1 text-[10px] text-slate-500">{s.sub}</p>:null}</div>)}</div></Card>
     <Card className="p-5"><h3 className="text-sm font-semibold text-slate-700 mb-3">Upload Document</h3>
       {upEdit?<div><input ref={fr} type="file" accept=".pdf,.doc,.docx" onChange={onFile} className="hidden"/><button onClick={()=>fr.current?.click()} className="flex items-center gap-2 px-4 py-3 border-2 border-dashed rounded-lg text-sm text-slate-600 hover:border-blue-400 w-full justify-center"><Upload size={18}/> Upload PDF / DOCX</button>
         {uf && <div className="mt-3 flex items-center gap-2"><div className="flex-1 p-2.5 bg-slate-50 rounded-lg flex items-center gap-2"><FileText size={16} className="text-blue-500"/><span className="text-sm font-medium truncate">{uf.name}</span></div><button onClick={()=>setUE(false)} className="px-3 py-2 bg-emerald-600 text-white text-xs rounded-md"><Save size={12}/></button></div>}

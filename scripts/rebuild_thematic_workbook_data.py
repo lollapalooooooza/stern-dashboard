@@ -9,7 +9,7 @@ import math
 import operator
 import re
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yfinance as yf
@@ -602,12 +602,22 @@ def build_active_rows(
     return db_rows, current_shares_by_ticker
 
 
-def build_benchmark_row(active_meta, any_meta, reference_date, valuation_date, reference_spy_price, valuation_spy_price, benchmark_value):
+def build_benchmark_row(
+    active_meta,
+    any_meta,
+    reference_date,
+    valuation_date,
+    reference_spy_price,
+    valuation_spy_price,
+    benchmark_value,
+    previous_spy_price=None,
+):
     meta = find_metadata("SPY", active_meta, any_meta)
     valuation_price = valuation_spy_price or reference_spy_price
     shares = benchmark_value / valuation_price if valuation_price else 0
     current_value = benchmark_value
     pnl = current_value - benchmark_value
+    weekly_return = (valuation_price / previous_spy_price) - 1 if previous_spy_price else 0
     return [
         "benchmark-spy",
         "SPY",
@@ -626,7 +636,7 @@ def build_benchmark_row(active_meta, any_meta, reference_date, valuation_date, r
         1.0,
         meta["valueBeta"],
         meta["momentumBeta"],
-        0,
+        weekly_return,
         current_value,
         pnl,
         0,
@@ -860,6 +870,7 @@ def main():
     reference_date = nearest_available_date(sorted_price_dates, snapshot_date)
     valuation_date = reference_date
     previous_week_date = trading_sessions_back(sorted_price_dates, valuation_date, 5)
+    snapshot_dt = date.fromisoformat(snapshot_date)
 
     match_active_ledger_rows(active_rows, ledger_rows)
     missing_price_tickers = sorted(
@@ -908,19 +919,30 @@ def main():
         cash_value = 0.0
 
     existing_spy_row = workbook_active_meta.get("SPY") or any_meta.get("SPY") or {}
-    reference_spy_price = float(existing_spy_row.get("buyPrice") or existing_spy_row.get("currentPrice") or 0)
-    valuation_spy_price = float(existing_spy_row.get("currentPrice") or reference_spy_price or 0)
+    snapshot_spy_rows = download_spy_history((snapshot_dt - timedelta(days=10)).isoformat(), (snapshot_dt + timedelta(days=2)).isoformat())
+    snapshot_spy_dates = sorted(snapshot_spy_rows)
+    snapshot_spy_date = nearest_available_date(snapshot_spy_dates, snapshot_date) if snapshot_spy_dates else None
+    snapshot_previous_spy_date = (
+        trading_sessions_back(snapshot_spy_dates, snapshot_spy_date, 5)
+        if snapshot_spy_date and len(snapshot_spy_dates) > 1
+        else None
+    )
+    reference_spy_price = float(snapshot_spy_rows.get(snapshot_spy_date) or existing_spy_row.get("buyPrice") or existing_spy_row.get("currentPrice") or 0)
+    valuation_spy_price = float(snapshot_spy_rows.get(snapshot_spy_date) or existing_spy_row.get("currentPrice") or reference_spy_price or 0)
+    previous_spy_price = float(snapshot_spy_rows.get(snapshot_previous_spy_date) or valuation_spy_price or reference_spy_price or 0)
     if reference_spy_price <= 0 or valuation_spy_price <= 0:
         reference_spy_price = valuation_spy_price = float(existing_summary.get("benchmarkCurrentPrice") or 1)
+        previous_spy_price = previous_spy_price or valuation_spy_price
 
     benchmark_row, benchmark_shares = build_benchmark_row(
         active_meta,
         any_meta,
-        reference_date,
-        valuation_date,
+        snapshot_spy_date or snapshot_date,
+        snapshot_spy_date or snapshot_date,
         reference_spy_price,
         valuation_spy_price,
         benchmark_value,
+        previous_spy_price,
     )
     exited_db_rows = build_exited_rows(ledger_rows, scale_by_ticker, active_meta, any_meta)
 

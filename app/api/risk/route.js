@@ -803,7 +803,7 @@ export async function POST(request) {
         weeklyVaR99: (actualVol / Math.sqrt(252)) * 2.326 * Math.sqrt(5),
         maxStockWeight,
         spyWeight,
-        activeCount: activeHoldings.length,
+        activeCount: activeHoldings.filter((holding) => holding.theme !== "Benchmark").length,
         totalValue,
         observations: portfolioDaily.length,
       },
