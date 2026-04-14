@@ -851,7 +851,7 @@ def main():
     active_meta = {**seed_active_meta, **workbook_active_meta}
     any_meta = {**seed_any_meta, **workbook_any_meta}
 
-    active_rows, _summary_rows = load_positions(Path(args.positions))
+    active_rows, summary_rows = load_positions(Path(args.positions))
     ledger_rows, price_rows = load_tracker(Path(args.tracker))
     balance_rows = load_balance_tracker(Path(args.balance)) if args.balance else []
 
@@ -884,15 +884,28 @@ def main():
 
     stock_value = sum(row[18] for row in active_db_rows)
     stock_weight = sum(row["weight"] for row in active_rows)
-    if stock_weight <= 0:
+    workbook_portfolio_value = as_float(summary_rows.get("Portfolio Value"))
+    workbook_benchmark_value = as_float(summary_rows.get("In Benchmark"))
+    if stock_weight <= 0 and workbook_portfolio_value is None:
         raise ValueError("Positions workbook did not contain positive active weights")
-    portfolio_value = stock_value / stock_weight
-    benchmark_value = portfolio_value * args.benchmark_weight
+
+    if workbook_portfolio_value is not None:
+        portfolio_value = float(workbook_portfolio_value)
+    else:
+        portfolio_value = stock_value / stock_weight
+
+    if workbook_benchmark_value is not None:
+        benchmark_value = float(workbook_benchmark_value)
+    else:
+        benchmark_value = portfolio_value * args.benchmark_weight
+
     cash_value = portfolio_value - stock_value - benchmark_value
     if cash_value < -1:
         raise ValueError(
-            f"Derived cash balance is negative ({cash_value:.2f}); check positions weights and benchmark weight"
+            f"Derived cash balance is negative ({cash_value:.2f}); check positions workbook totals and benchmark weight"
         )
+    if abs(cash_value) < 1e-6:
+        cash_value = 0.0
 
     existing_spy_row = workbook_active_meta.get("SPY") or any_meta.get("SPY") or {}
     reference_spy_price = float(existing_spy_row.get("buyPrice") or existing_spy_row.get("currentPrice") or 0)
