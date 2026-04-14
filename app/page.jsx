@@ -992,6 +992,401 @@ function selectReturnHistory(view, weeklyHistory, dailyHistoryRows) {
   return normalizeWeeklyHistoryRows(weeklyHistory);
 }
 
+function buildLiveBookSnapshot(holdings, settings, dailyHistory = []) {
+  const holdingsSnapshot = computeHoldings(holdings, settings);
+  const trackedDailyHistory = normalizeDailyHistoryRows(dailyHistory);
+  const latestTrackedBalance = trackedDailyHistory.at(-1) || null;
+  const fallbackBaseRow = trackedDailyHistory.length > 1 ? trackedDailyHistory.at(-2) : latestTrackedBalance;
+  const previousNav = holdingsSnapshot.previousTotalVal ?? fallbackBaseRow?.portfolioValue ?? null;
+  const previousNavDate = fallbackBaseRow?.date || latestTrackedBalance?.date || null;
+  const dayPnl = previousNav > 0 ? holdingsSnapshot.totalVal - previousNav : null;
+  const dayReturn = Number.isFinite(holdingsSnapshot.liveDailyReturn)
+    ? holdingsSnapshot.liveDailyReturn
+    : (previousNav > 0 ? holdingsSnapshot.totalVal / previousNav - 1 : null);
+  const bookSummary = summarizeActiveBook(holdingsSnapshot.computed, holdingsSnapshot.cashBalance, holdingsSnapshot.totalVal);
+  const activeStocks = holdingsSnapshot.computed.filter((holding) => holding.theme !== "Benchmark");
+
+  return {
+    ...holdingsSnapshot,
+    nav: holdingsSnapshot.totalVal,
+    stockValue: bookSummary.stockValue,
+    benchmarkValue: bookSummary.benchmarkValue,
+    portfolioTotal: bookSummary.portfolioTotal,
+    activeStocks,
+    activeStockCount: activeStocks.length,
+    exitedCount: holdingsSnapshot.exited.length,
+    trackedDailyHistory,
+    latestTrackedBalance,
+    previousNav,
+    previousNavDate,
+    dayPnl,
+    dayReturn,
+    benchmarkDayReturn: holdingsSnapshot.liveBenchmarkReturn,
+    trackerStartValue: trackedDailyHistory[0]?.portfolioValue ?? null,
+    liveToTrackerGap: latestTrackedBalance ? holdingsSnapshot.totalVal - latestTrackedBalance.portfolioValue : null,
+    bookSummary,
+  };
+}
+
+function buildHistoricalPerformanceSnapshot(weeklyHistory, dailyHistory, liveBookSnapshot, view = "weekly") {
+  const liveDailyHistory = buildLiveDailyHistoryRows(dailyHistory, {
+    portfolioValue: liveBookSnapshot?.nav,
+    dailyReturn: liveBookSnapshot?.dayReturn,
+    benchmarkReturn: liveBookSnapshot?.benchmarkDayReturn,
+  });
+  const historyRows = selectReturnHistory(view, weeklyHistory, liveDailyHistory);
+  const chartData = addHistoryLabels(historyRows, view).map((row) => ({
+    ...row,
+    excessReturn: (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0),
+    explainedReturn: Number(row.marketContrib || 0),
+    selectionReturn: Number(row.alpha || 0),
+  }));
+  const cumulativeData = buildCumulativeReturnSeries(historyRows).map((row, index) => ({
+    ...row,
+    label: chartData[index]?.label,
+  }));
+  const cumulativePortfolio = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].portfolio : 0;
+  const cumulativeBenchmark = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].benchmark : 0;
+  const excessReturn = cumulativePortfolio - cumulativeBenchmark;
+  const bestWorstSample = view === "weekly" && chartData.length > 5 ? chartData.slice(5) : chartData;
+  const bestPeriod = bestWorstSample.length ? [...bestWorstSample].sort((a, b) => b.portfolioReturn - a.portfolioReturn)[0] : null;
+  const worstPeriod = bestWorstSample.length ? [...bestWorstSample].sort((a, b) => a.portfolioReturn - b.portfolioReturn)[0] : null;
+  const historyTable = [...chartData].reverse();
+  const hitRate = chartData.length ? chartData.filter((row) => row.portfolioReturn > 0).length / chartData.length : 0;
+  const drawdownSeries = buildReturnDrawdownSeries(chartData);
+  const portfolioDrawdown = summarizeReturnDrawdown(drawdownSeries, "portfolioDrawdown");
+  const benchmarkDrawdown = summarizeReturnDrawdown(drawdownSeries, "benchmarkDrawdown");
+  const currentDrawdown = drawdownSeries.length ? drawdownSeries[drawdownSeries.length - 1].portfolioDrawdown : 0;
+
+  return {
+    view,
+    liveDailyHistory,
+    historyRows,
+    chartData,
+    cumulativeData,
+    cumulativePortfolio,
+    cumulativeBenchmark,
+    excessReturn,
+    bestPeriod,
+    worstPeriod,
+    historyTable,
+    hitRate,
+    drawdownSeries,
+    portfolioDrawdown,
+    benchmarkDrawdown,
+    currentDrawdown,
+    maxDrawdown: portfolioDrawdown.worstDrawdown,
+    latestHistoryDate: historyRows.at(-1)?.date || null,
+    periodCount: historyRows.length,
+  };
+}
+
+function buildLiveRiskSnapshot(risk) {
+  const analytics = risk?.analytics || null;
+  const metrics = analytics?.metrics || null;
+  const pending = !metrics && !risk?.error && (risk?.isLoading || risk?.isRefreshing);
+
+  return {
+    analytics,
+    metrics,
+    details: metrics ? buildRiskStatDetails(analytics) : {},
+    beta: metrics?.portfolioBeta ?? null,
+    trackingError: metrics?.trackingError ?? null,
+    pending,
+    available: !!metrics,
+    updatedAt: metrics?.updatedAt || null,
+    betaStatus: pending
+      ? "Loading live regression..."
+      : metrics
+        ? `${metrics.betaObservations || metrics.observations}d 5Y market regression`
+        : (risk?.error || "Live regression unavailable"),
+    trackingErrorStatus: pending
+      ? "Loading live regression..."
+      : metrics
+        ? "Annualized active risk vs SPY"
+        : (risk?.error || "Live regression unavailable"),
+  };
+}
+
+function buildStopLossSnapshot(holdings, settings) {
+  const active = holdings.filter((holding) => holding.status === "active" && holding.theme !== "Benchmark");
+  const rows = active.map((holding) => {
+    const stopLossPrice = asNumber(holding.buyPrice) * (1 - asNumber(holding.stopLossPct));
+    const distanceToStop = asNumber(holding.currentPrice) > 0
+      ? (asNumber(holding.currentPrice) - stopLossPrice) / asNumber(holding.currentPrice)
+      : 1;
+    const alertStatus = asNumber(holding.currentPrice) <= stopLossPrice
+      ? "BREACH"
+      : distanceToStop < asNumber(settings?.stopLossWarningBuffer)
+        ? "WARNING"
+        : "OK";
+    return {
+      ...holding,
+      slPrice: stopLossPrice,
+      distToSl: distanceToStop,
+      alertStatus,
+    };
+  });
+  const breachedRows = rows.filter((row) => row.alertStatus === "BREACH");
+  const warningRows = rows.filter((row) => row.alertStatus === "WARNING");
+  const okRows = rows.filter((row) => row.alertStatus === "OK");
+
+  return {
+    active,
+    rows,
+    warningBuffer: asNumber(settings?.stopLossWarningBuffer),
+    breachedCount: breachedRows.length,
+    warningCount: warningRows.length,
+    okCount: okRows.length,
+    monitoredCount: rows.length,
+    alertCount: breachedRows.length + warningRows.length,
+    avgStopLossPct: rows.length ? rows.reduce((sum, row) => sum + (Number(row.stopLossPct) || 0), 0) / rows.length : 0,
+    topAlerts: [...rows].sort((left, right) => left.distToSl - right.distToSl).slice(0, 8),
+  };
+}
+
+function buildOverviewManagerStatDetails({ liveBookSnapshot, historicalPerformanceSnapshot, liveRiskSnapshot, stopLossSnapshot, lastPriceUpdate }) {
+  const historyRowsPayload = historicalPerformanceSnapshot.historyRows.map((row) => ({
+    week: row.week,
+    date: row.date,
+    portfolio_return: Number(asNumber(row.portfolioReturn).toFixed(8)),
+    benchmark_return: Number(asNumber(row.benchmarkReturn).toFixed(8)),
+  }));
+  const liveBookPayload = {
+    portfolio_nav: Number(asNumber(liveBookSnapshot.nav).toFixed(6)),
+    stock_value: Number(asNumber(liveBookSnapshot.stockValue).toFixed(6)),
+    benchmark_value: Number(asNumber(liveBookSnapshot.benchmarkValue).toFixed(6)),
+    cash: Number(asNumber(liveBookSnapshot.cashBalance).toFixed(6)),
+    previous_nav: liveBookSnapshot.previousNav == null ? null : Number(asNumber(liveBookSnapshot.previousNav).toFixed(6)),
+    day_pnl: liveBookSnapshot.dayPnl == null ? null : Number(asNumber(liveBookSnapshot.dayPnl).toFixed(6)),
+    day_return: liveBookSnapshot.dayReturn == null ? null : Number(asNumber(liveBookSnapshot.dayReturn).toFixed(8)),
+    realized_pnl: Number(asNumber(liveBookSnapshot.totalRealizedPnl).toFixed(6)),
+    unrealized_pnl: Number(asNumber(liveBookSnapshot.totalUnrealizedPnl).toFixed(6)),
+    active_stock_count: liveBookSnapshot.activeStockCount,
+    exited_count: liveBookSnapshot.exitedCount,
+  };
+  const historyPayload = {
+    latest_date: historicalPerformanceSnapshot.latestHistoryDate,
+    rows: historyRowsPayload,
+  };
+  const stopLossPayload = {
+    warning_buffer: Number(asNumber(stopLossSnapshot.warningBuffer).toFixed(8)),
+    monitored_count: stopLossSnapshot.monitoredCount,
+    breached_count: stopLossSnapshot.breachedCount,
+    warning_count: stopLossSnapshot.warningCount,
+    rows: stopLossSnapshot.rows.map((row) => ({
+      ticker: row.ticker,
+      current_price: Number(asNumber(row.currentPrice).toFixed(6)),
+      buy_price: Number(asNumber(row.buyPrice).toFixed(6)),
+      stop_loss_pct: Number(asNumber(row.stopLossPct).toFixed(8)),
+      stop_loss_price: Number(asNumber(row.slPrice).toFixed(6)),
+      distance_to_stop: Number(asNumber(row.distToSl).toFixed(8)),
+      alert_status: row.alertStatus,
+    })),
+  };
+
+  return {
+    portfolioNav: {
+      sectionLabel: "Overview Formula",
+      title: "Portfolio NAV",
+      displayedValue: fmt.usdExact(liveBookSnapshot.nav),
+      displayedSub: lastPriceUpdate ? `Live · ${lastPriceUpdate}` : "Live holdings snapshot",
+      source: "Displayed from the live book snapshot after holdings are refreshed with current Yahoo prices and cash is added back to the book.",
+      formula: [
+        "portfolio_nav = stock_value + benchmark_value + cash",
+      ],
+      inputs: [
+        `stock_value = ${fmt.usdExact(liveBookSnapshot.stockValue)}`,
+        `benchmark_value = ${fmt.usdExact(liveBookSnapshot.benchmarkValue)}`,
+        `cash = ${fmt.usdExact(liveBookSnapshot.cashBalance)}`,
+      ],
+      calculation: [
+        `portfolio_nav = ${fmt.usdExact(liveBookSnapshot.stockValue)} + ${fmt.usdExact(liveBookSnapshot.benchmarkValue)} + ${fmt.usdExact(liveBookSnapshot.cashBalance)} = ${fmt.usdExact(liveBookSnapshot.nav)}`,
+      ],
+      notes: [
+        `${liveBookSnapshot.activeStockCount} active stock holdings`,
+        `${liveBookSnapshot.exitedCount} exited positions`,
+        liveBookSnapshot.latestTrackedBalance ? `Tracker ${fmt.shortDate(liveBookSnapshot.latestTrackedBalance.date)} = ${fmt.usdExact(liveBookSnapshot.latestTrackedBalance.portfolioValue)}` : "No tracker balance available",
+      ],
+      pythonFileName: "overview_portfolio_nav_check.py",
+      pythonSource: buildPythonScript("Recompute Overview portfolio NAV from stock, benchmark, and cash", liveBookPayload, [
+        'portfolio_nav = data["stock_value"] + data["benchmark_value"] + data["cash"]',
+        'print({"portfolio_nav": round(portfolio_nav, 2)})',
+      ]),
+    },
+    dayPnl: {
+      sectionLabel: "Overview Formula",
+      title: "Day P&L",
+      displayedValue: fmt.usdExact(liveBookSnapshot.dayPnl),
+      displayedSub: `${fmt.pct(liveBookSnapshot.dayReturn)}${lastPriceUpdate ? ` · Live ${lastPriceUpdate}` : " · Live"}`,
+      source: "Displayed from the live book snapshot by comparing the current portfolio NAV with the prior close portfolio NAV.",
+      formula: [
+        "day_pnl = current_portfolio_nav - prior_close_portfolio_nav",
+        "day_return = day_pnl / prior_close_portfolio_nav",
+      ],
+      inputs: [
+        `current_portfolio_nav = ${fmt.usdExact(liveBookSnapshot.nav)}`,
+        `prior_close_portfolio_nav = ${fmt.usdExact(liveBookSnapshot.previousNav)}`,
+        liveBookSnapshot.previousNavDate ? `base_date = ${fmt.date(liveBookSnapshot.previousNavDate)}` : "base_date = previous close snapshot",
+      ],
+      calculation: [
+        `day_pnl = ${fmt.usdExact(liveBookSnapshot.nav)} - ${fmt.usdExact(liveBookSnapshot.previousNav)} = ${fmt.usdExact(liveBookSnapshot.dayPnl)}`,
+        `day_return = ${fmt.usdExact(liveBookSnapshot.dayPnl)} / ${fmt.usdExact(liveBookSnapshot.previousNav)} = ${fmt.pct(liveBookSnapshot.dayReturn)}`,
+      ],
+      notes: [
+        `Current unrealized PnL = ${fmt.usdExact(liveBookSnapshot.totalUnrealizedPnl)}`,
+        `Current realized PnL = ${fmt.usdExact(liveBookSnapshot.totalRealizedPnl)}`,
+        "Day move is separate from since-inception performance.",
+      ],
+      pythonFileName: "overview_day_pnl_check.py",
+      pythonSource: buildPythonScript("Recompute Overview day P&L and day return from the live NAV base", liveBookPayload, [
+        'prior_close_nav = data["previous_nav"] or 0.0',
+        'day_pnl = data["portfolio_nav"] - prior_close_nav',
+        'day_return = (day_pnl / prior_close_nav) if prior_close_nav else None',
+        'print({"day_pnl": round(day_pnl, 2), "day_return": None if day_return is None else round(day_return, 6)})',
+      ]),
+    },
+    sinceInceptionReturn: {
+      sectionLabel: "Overview Formula",
+      title: "Since-Inception Return",
+      displayedValue: fmt.pct(historicalPerformanceSnapshot.cumulativePortfolio),
+      displayedSub: historicalPerformanceSnapshot.latestHistoryDate ? `As of ${fmt.shortDate(historicalPerformanceSnapshot.latestHistoryDate)}` : "As of canonical weekly history",
+      source: "Displayed from the canonical compounded weekly return history. This is the same cumulative series used by the Returns tab default view.",
+      formula: [
+        "portfolio_nav_0 = 1",
+        "portfolio_nav_t = portfolio_nav_(t-1) × (1 + portfolio_return_t)",
+        "since_inception_return = final_portfolio_nav - 1",
+      ],
+      inputs: [
+        `history_periods = ${historicalPerformanceSnapshot.periodCount}`,
+        historicalPerformanceSnapshot.historyRows[0]?.date ? `start_date = ${fmt.date(historicalPerformanceSnapshot.historyRows[0].date)}` : "start_date = unavailable",
+        historicalPerformanceSnapshot.latestHistoryDate ? `latest_date = ${fmt.date(historicalPerformanceSnapshot.latestHistoryDate)}` : "latest_date = unavailable",
+      ],
+      calculation: [
+        `compounded_portfolio_return = ${fmt.pct(historicalPerformanceSnapshot.cumulativePortfolio)}`,
+      ],
+      notes: [
+        `Compounded benchmark return = ${fmt.pct(historicalPerformanceSnapshot.cumulativeBenchmark)}`,
+        "This top-line return is intentionally historical and not derived from current realized + unrealized PnL.",
+      ],
+      pythonFileName: "overview_since_inception_return_check.py",
+      pythonSource: buildPythonScript("Recompute Overview since-inception return from the canonical weekly return history", historyPayload, [
+        'portfolio_nav = 1.0',
+        'for row in data["rows"]:',
+        '    portfolio_nav *= 1 + row["portfolio_return"]',
+        'print({"since_inception_return": round(portfolio_nav - 1, 6), "periods": len(data["rows"])})',
+      ]),
+    },
+    excessReturn: {
+      sectionLabel: "Overview Formula",
+      title: "Excess Return vs S&P 500",
+      displayedValue: fmt.pct(historicalPerformanceSnapshot.excessReturn),
+      displayedSub: historicalPerformanceSnapshot.latestHistoryDate ? `As of ${fmt.shortDate(historicalPerformanceSnapshot.latestHistoryDate)}` : "As of canonical weekly history",
+      source: "Displayed as portfolio compounded return minus benchmark compounded return over the same canonical weekly history used by the Returns tab.",
+      formula: [
+        "portfolio_cumulative = Π(1 + portfolio_return_t) - 1",
+        "benchmark_cumulative = Π(1 + benchmark_return_t) - 1",
+        "excess_return = portfolio_cumulative - benchmark_cumulative",
+      ],
+      inputs: [
+        `portfolio_cumulative = ${fmt.pct(historicalPerformanceSnapshot.cumulativePortfolio)}`,
+        `benchmark_cumulative = ${fmt.pct(historicalPerformanceSnapshot.cumulativeBenchmark)}`,
+        `history_periods = ${historicalPerformanceSnapshot.periodCount}`,
+      ],
+      calculation: [
+        `excess_return = ${fmt.pct(historicalPerformanceSnapshot.cumulativePortfolio)} - ${fmt.pct(historicalPerformanceSnapshot.cumulativeBenchmark)} = ${fmt.pct(historicalPerformanceSnapshot.excessReturn)}`,
+      ],
+      notes: [
+        "Overview and Returns use the same canonical weekly history for this number.",
+      ],
+      pythonFileName: "overview_excess_return_check.py",
+      pythonSource: buildPythonScript("Recompute Overview excess return from the canonical weekly return history", historyPayload, [
+        'portfolio_nav = 1.0',
+        'benchmark_nav = 1.0',
+        'for row in data["rows"]:',
+        '    portfolio_nav *= 1 + row["portfolio_return"]',
+        '    benchmark_nav *= 1 + row["benchmark_return"]',
+        'portfolio_cumulative = portfolio_nav - 1',
+        'benchmark_cumulative = benchmark_nav - 1',
+        'print({"portfolio_cumulative": round(portfolio_cumulative, 6), "benchmark_cumulative": round(benchmark_cumulative, 6), "excess_return": round(portfolio_cumulative - benchmark_cumulative, 6)})',
+      ]),
+    },
+    currentDrawdown: {
+      sectionLabel: "Overview Formula",
+      title: "Current Drawdown",
+      displayedValue: fmt.pct(historicalPerformanceSnapshot.currentDrawdown),
+      displayedSub: `Max DD ${fmt.pct(historicalPerformanceSnapshot.maxDrawdown)}${historicalPerformanceSnapshot.latestHistoryDate ? ` · As of ${fmt.shortDate(historicalPerformanceSnapshot.latestHistoryDate)}` : ""}`,
+      source: "Displayed from the canonical weekly compounded return series by measuring the gap between the latest portfolio NAV path and its running peak.",
+      formula: [
+        "portfolio_nav_t = portfolio_nav_(t-1) × (1 + portfolio_return_t)",
+        "running_peak_t = max(portfolio_nav_0 ... portfolio_nav_t)",
+        "drawdown_t = portfolio_nav_t / running_peak_t - 1",
+      ],
+      inputs: [
+        `current_drawdown = ${fmt.pct(historicalPerformanceSnapshot.currentDrawdown)}`,
+        `max_drawdown = ${fmt.pct(historicalPerformanceSnapshot.maxDrawdown)}`,
+        `peak_period = ${historicalPerformanceSnapshot.portfolioDrawdown.peakWeek}`,
+        `trough_period = ${historicalPerformanceSnapshot.portfolioDrawdown.troughWeek}`,
+      ],
+      calculation: [
+        `current_drawdown = latest_portfolio_nav / running_peak_nav - 1 = ${fmt.pct(historicalPerformanceSnapshot.currentDrawdown)}`,
+        `max_drawdown = ${fmt.pct(historicalPerformanceSnapshot.maxDrawdown)} from ${historicalPerformanceSnapshot.portfolioDrawdown.peakWeek} to ${historicalPerformanceSnapshot.portfolioDrawdown.troughWeek}`,
+      ],
+      notes: [
+        historicalPerformanceSnapshot.portfolioDrawdown.troughDate ? `Latest trough date = ${fmt.date(historicalPerformanceSnapshot.portfolioDrawdown.troughDate)}` : "No trough date available",
+        `Benchmark max drawdown = ${fmt.pct(historicalPerformanceSnapshot.benchmarkDrawdown.worstDrawdown)}`,
+      ],
+      pythonFileName: "overview_current_drawdown_check.py",
+      pythonSource: buildPythonScript("Recompute Overview current drawdown from the canonical weekly return history", historyPayload, [
+        'portfolio_nav = 1.0',
+        'running_peak = 1.0',
+        'current_drawdown = 0.0',
+        'max_drawdown = 0.0',
+        'for row in data["rows"]:',
+        '    portfolio_nav *= 1 + row["portfolio_return"]',
+        '    running_peak = max(running_peak, portfolio_nav)',
+        '    current_drawdown = portfolio_nav / running_peak - 1',
+        '    max_drawdown = min(max_drawdown, current_drawdown)',
+        'print({"current_drawdown": round(current_drawdown, 6), "max_drawdown": round(max_drawdown, 6)})',
+      ]),
+    },
+    portfolioBeta: liveRiskSnapshot.details.portfolioBeta || null,
+    trackingError: liveRiskSnapshot.details.trackingError || null,
+    stopLossAlerts: {
+      sectionLabel: "Overview Formula",
+      title: "Stop-Loss Alerts",
+      displayedValue: `${stopLossSnapshot.alertCount}`,
+      displayedSub: `${stopLossSnapshot.breachedCount} breach · ${stopLossSnapshot.warningCount} warning`,
+      source: "Displayed from the same active-position stop-loss engine used by the Stop-Loss tab. Benchmark positions are excluded.",
+      formula: [
+        "stop_loss_price_i = buy_price_i × (1 - stop_loss_pct_i)",
+        "distance_to_stop_i = (current_price_i - stop_loss_price_i) / current_price_i",
+        "if current_price_i <= stop_loss_price_i: BREACH",
+        "elif distance_to_stop_i < warning_buffer: WARNING",
+        "alerts = breach_count + warning_count",
+      ],
+      inputs: [
+        `warning_buffer = ${fmt.pct(stopLossSnapshot.warningBuffer, 1)}`,
+        `monitored_positions = ${stopLossSnapshot.monitoredCount}`,
+        `breach_count = ${stopLossSnapshot.breachedCount}`,
+        `warning_count = ${stopLossSnapshot.warningCount}`,
+      ],
+      calculation: [
+        `alerts = ${stopLossSnapshot.breachedCount} + ${stopLossSnapshot.warningCount} = ${stopLossSnapshot.alertCount}`,
+      ],
+      notes: stopLossSnapshot.topAlerts.length
+        ? stopLossSnapshot.topAlerts.map((row) => `${row.ticker}: ${row.alertStatus} at ${fmt.pct(row.distToSl, 1)} from stop`)
+        : ["No monitored active stock positions."],
+      pythonFileName: "overview_stop_loss_alerts_check.py",
+      pythonSource: buildPythonScript("Recompute Overview stop-loss alerts from the monitored active positions", stopLossPayload, [
+        'breach_count = sum(1 for row in data["rows"] if row["current_price"] <= row["stop_loss_price"])',
+        'warning_count = sum(1 for row in data["rows"] if row["current_price"] > row["stop_loss_price"] and row["distance_to_stop"] < data["warning_buffer"])',
+        'print({"breach_count": breach_count, "warning_count": warning_count, "alerts": breach_count + warning_count})',
+      ]),
+    },
+  };
+}
+
 function buildOverviewStatDetails(context) {
   const {
     totalVal,
@@ -1710,144 +2105,144 @@ function buildRiskStatDetails(analytics) {
 // ═══════════════════════════════════════════════════════════════════
 // OVERVIEW
 // ═══════════════════════════════════════════════════════════════════
-function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk }) {
+function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, lastPriceUpdate }) {
   const [returnView, setReturnView] = useState("weekly");
-  const {
-    totalVal,
-    investedVal,
-    previousTotalVal,
-    cashBalance,
-    computed,
-    exited,
-    totalRealizedPnl,
-    totalUnrealizedPnl,
-    activeCostBasis,
-    realizedCostBasis,
-    totalPnl,
-    totalReturnPct,
-    liveDailyReturn,
-    liveBenchmarkReturn,
-  } = computeHoldings(holdings, settings);
-  const liveRiskMetrics = risk?.analytics?.metrics || null;
-  const trackedDailyHistory = normalizeDailyHistoryRows(dailyHistory);
-  const liveDailyHistory = buildLiveDailyHistoryRows(dailyHistory, {
-    portfolioValue: totalVal,
-    dailyReturn: liveDailyReturn,
-    benchmarkReturn: liveBenchmarkReturn,
-  });
-  const analysisHistory = selectReturnHistory(returnView, weeklyHistory, liveDailyHistory);
-  const bookSummary = summarizeActiveBook(computed, cashBalance, totalVal);
-  const latestTrackedBalance = trackedDailyHistory.at(-1) || null;
-  const liveLatestBalance = liveDailyHistory.at(-1) || null;
-  const portfolioStartValue = trackedDailyHistory[0]?.portfolioValue ?? liveDailyHistory[0]?.portfolioValue ?? null;
-  const overviewDailyReturn = liveDailyReturn ?? (liveLatestBalance?.portfolioReturn ?? null);
-  const dailyReturnTrend = overviewDailyReturn == null ? undefined : (overviewDailyReturn >= 0 ? "up" : "down");
-  const dailyReturnColor = overviewDailyReturn == null ? "text-slate-700" : (overviewDailyReturn >= 0 ? "text-emerald-700" : "text-red-600");
-  const liveDailyBaseDate = previousTotalVal == null && liveDailyHistory.length > 1 ? liveDailyHistory.at(-2)?.date : null;
-  const liveDailyBaseValue = previousTotalVal ?? (liveDailyHistory.length > 1 ? liveDailyHistory.at(-2)?.portfolioValue : latestTrackedBalance?.portfolioValue ?? null);
-  const liveToTrackerGap = latestTrackedBalance ? totalVal - latestTrackedBalance.portfolioValue : null;
-  const displayPortfolioValue = totalVal;
-  const unrealizedPnlPct = displayPortfolioValue > 0 ? totalUnrealizedPnl / displayPortfolioValue : 0;
-  const realizedPnlPct = displayPortfolioValue > 0 ? totalRealizedPnl / displayPortfolioValue : 0;
-  const displayTotalReturnDollar = totalPnl;
-  const displayTotalReturnPct = displayPortfolioValue > 0 ? totalPnl / displayPortfolioValue : totalReturnPct;
-  const stocksOnly = computed.filter(h => h.theme!=="Benchmark");
-  const localPortBeta = calc.portfolioBeta(computed);
-  const localSysVol = calc.systematicVol(localPortBeta, settings.benchmarkVol);
-  const localIdioVol = calc.idiosyncraticVol(settings.portfolioVol, localSysVol);
-  const localTe = calc.trackingError(localPortBeta, settings.benchmarkVol, localIdioVol);
-  const betaPending = !liveRiskMetrics && !risk?.error && (risk?.isLoading || risk?.isRefreshing);
-  const displayBeta = betaPending ? null : (liveRiskMetrics?.portfolioBeta ?? localPortBeta);
-  const displayTrackingError = liveRiskMetrics?.trackingError ?? localTe;
-  const displayDailyVaR95 = liveRiskMetrics?.dailyVaR95 ?? calc.dailyVaR95(settings.portfolioVol);
-  const displayAnnualizedVol = liveRiskMetrics?.annualizedVol ?? settings.portfolioVol;
-  const displaySystematicVol = liveRiskMetrics?.systematicVol ?? localSysVol;
-  const betaStatus = risk?.isLoading ? "Loading 5Y market regression..." : risk?.isRefreshing ? "Refreshing 5Y market regression..." : liveRiskMetrics ? `${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}d 5Y market regression` : risk?.error ? "Risk analytics unavailable" : "Holdings-weighted fallback";
-  const allocationLegend = [...bookSummary.portfolioAllocation].sort((a,b)=>b.value-a.value);
-  const cumData = buildCumulativeReturnSeries(analysisHistory).map((row, index) => ({ ...row, label: returnView === "daily" ? fmt.shortDate(analysisHistory[index]?.date) : analysisHistory[index]?.week }));
-  const pnlSorted = [...stocksOnly].sort((a,b)=>b.pnlDollar-a.pnlDollar);
-  const pnlChart = [...pnlSorted.slice(0,5),...pnlSorted.slice(-5)];
-  const tickers = stocksOnly.map(h=>h.ticker);
-  const activeStockCount = stocksOnly.length;
-  const overviewDetails = buildOverviewStatDetails({
-    totalVal,
-    cashBalance,
-    computed,
-    exited,
-    investedVal,
-    bookSummary,
-    latestTrackedBalance,
-    liveToTrackerGap,
-    overviewDailyReturn,
-    liveDailyBaseDate,
-    liveDailyBaseValue,
-    displayTotalReturnDollar,
-    displayTotalReturnPct,
-    totalPnl,
-    totalUnrealizedPnl,
-    unrealizedPnlPct,
-    totalRealizedPnl,
-    realizedPnlPct,
-    activeCostBasis,
-    realizedCostBasis,
-    displayBeta,
-    betaStatus,
-    liveRiskMetrics,
-    localPortBeta,
-    displayTrackingError,
-    localTe,
-    displayDailyVaR95,
-    displayAnnualizedVol,
-    displaySystematicVol,
-    localSysVol,
-    betaPending,
-    latestTrackerDateLabel: latestTrackedBalance ? fmt.shortDate(latestTrackedBalance.date) : "",
-    portfolioStartValue,
-    previousTotalVal,
-    activeStockCount,
-  });
+  const liveBookSnapshot = useMemo(
+    () => buildLiveBookSnapshot(holdings, settings, dailyHistory),
+    [holdings, settings, dailyHistory],
+  );
+  const chartPerformanceSnapshot = useMemo(
+    () => buildHistoricalPerformanceSnapshot(weeklyHistory, dailyHistory, liveBookSnapshot, returnView),
+    [weeklyHistory, dailyHistory, liveBookSnapshot, returnView],
+  );
+  const weeklyPerformanceSnapshot = useMemo(
+    () => buildHistoricalPerformanceSnapshot(weeklyHistory, dailyHistory, liveBookSnapshot, "weekly"),
+    [weeklyHistory, dailyHistory, liveBookSnapshot],
+  );
+  const liveRiskSnapshot = useMemo(() => buildLiveRiskSnapshot(risk), [risk]);
+  const stopLossSnapshot = useMemo(() => buildStopLossSnapshot(holdings, settings), [holdings, settings]);
+  const overviewDetails = useMemo(() => buildOverviewManagerStatDetails({
+    liveBookSnapshot,
+    historicalPerformanceSnapshot: weeklyPerformanceSnapshot,
+    liveRiskSnapshot,
+    stopLossSnapshot,
+    lastPriceUpdate,
+    settings,
+  }), [liveBookSnapshot, weeklyPerformanceSnapshot, liveRiskSnapshot, stopLossSnapshot, lastPriceUpdate, settings]);
+
+  const allocationLegend = [...liveBookSnapshot.bookSummary.portfolioAllocation].sort((a, b) => b.value - a.value);
+  const pnlSorted = [...liveBookSnapshot.activeStocks].sort((a, b) => b.pnlDollar - a.pnlDollar);
+  const pnlChart = [...pnlSorted.slice(0, 5), ...pnlSorted.slice(-5)];
+  const tickers = liveBookSnapshot.activeStocks.map((holding) => holding.ticker);
+  const navSub = lastPriceUpdate ? `Live · ${lastPriceUpdate}` : "Live";
+  const historyAsOf = weeklyPerformanceSnapshot.latestHistoryDate ? `As of ${fmt.shortDate(weeklyPerformanceSnapshot.latestHistoryDate)}` : "As of weekly history";
+  const stopLossSub = `${stopLossSnapshot.breachedCount} breach · ${stopLossSnapshot.warningCount} warning`;
 
   return <div className="space-y-6">
-    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-      <StatCard label="Portfolio Value" value={fmt.usdExact(totalVal)} icon={DollarSign} tooltip={`Live holdings + cash: ${fmt.usdExact(totalVal)}\nStock holdings: ${fmt.usdExact(bookSummary.stockValue)}\nBenchmark: ${fmt.usdExact(bookSummary.benchmarkValue)}\nCash: ${fmt.usdExact(cashBalance)}${latestTrackedBalance ? `\nTracker latest (${fmt.date(latestTrackedBalance.date)}): ${fmt.usdExact(latestTrackedBalance.portfolioValue)}\nLive - tracker gap: ${fmt.usdExact(liveToTrackerGap)}` : ""}`} detail={overviewDetails.portfolioValue} />
-      <StatCard label="Daily Return" value={fmt.pct(overviewDailyReturn)} trend={dailyReturnTrend} color={dailyReturnColor} icon={ArrowRightLeft} tooltip={`Live holdings return versus ${previousTotalVal != null ? "previous close" : "latest tracked base"}\nCurrent live value: ${fmt.usdExact(totalVal)}${liveDailyBaseDate ? `\nBase date: ${fmt.date(liveDailyBaseDate)}` : ""}${liveDailyBaseValue != null ? `\nBase value: ${fmt.usdExact(liveDailyBaseValue)}` : ""}`} detail={overviewDetails.dailyReturn} />
-      <StatCard label="Total Return" value={fmt.usdExact(displayTotalReturnDollar)} sub={fmt.pct(displayTotalReturnPct)} trend={displayTotalReturnDollar >= 0 ? "up" : "down"} color={displayTotalReturnDollar >= 0 ? "text-emerald-700" : "text-red-600"} icon={BarChart3} tooltip={`Realized + unrealized PnL: ${fmt.usdExact(totalPnl)}\nMeasured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}${portfolioStartValue != null ? `\nInitial tracked balance: ${fmt.usdExact(portfolioStartValue)}` : ""}${latestTrackedBalance ? `\nLatest tracked balance: ${fmt.usdExact(latestTrackedBalance.portfolioValue)}` : ""}`} detail={overviewDetails.totalReturn} />
-      <StatCard label="Unrealized PnL" value={fmt.usdExact(totalUnrealizedPnl)} sub={fmt.pct(unrealizedPnlPct)} trend={totalUnrealizedPnl >= 0 ? "up" : "down"} color={totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={TrendingUp} tooltip={`Open-position PnL from active holdings\nCost basis: ${fmt.usdExact(activeCostBasis)}\nCurrent active value: ${fmt.usdExact(investedVal)}\nPercent is measured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}`} detail={overviewDetails.unrealizedPnl} />
-      <StatCard label="Realized PnL" value={fmt.usdExact(totalRealizedPnl)} sub={fmt.pct(realizedPnlPct)} trend={totalRealizedPnl >= 0 ? "up" : "down"} color={totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"} icon={LogOut} tooltip={`${exited.length} exited positions\nExited cost basis: ${fmt.usdExact(realizedCostBasis)}\nPercent is measured versus full portfolio value: ${fmt.usdExact(displayPortfolioValue)}`} detail={overviewDetails.realizedPnl} />
-      <StatCard label="Portfolio Beta" value={displayBeta == null ? "—" : fmt.num(displayBeta)} sub={betaStatus} icon={Shield} tooltip={betaPending ? "Waiting for the 5Y market regression to finish before showing the final beta." : liveRiskMetrics ? `5Y portfolio beta versus ${liveRiskMetrics.betaBenchmark || "^GSPC"} built from reconstructed holdings returns.\nObservations: ${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}` : "Fallback to holdings-weighted beta because live regression is not available."} detail={overviewDetails.portfolioBeta}/>
-      <StatCard label="Tracking Error" value={fmt.pct(displayTrackingError)} icon={Activity} detail={overviewDetails.trackingError}/>
-      <StatCard label="Daily VaR 95%" value={fmt.pct(displayDailyVaR95)} icon={AlertTriangle} detail={overviewDetails.dailyVar95}/>
-      <StatCard label="Active" value={activeStockCount} icon={Briefcase} sub={`${exited.length} exited`} detail={overviewDetails.active}/>
-      <StatCard label="Themes" value={bookSummary.stockThemeCount} icon={BarChart3} detail={overviewDetails.themes}/>
-      <StatCard label="Ann. Vol" value={fmt.pct(displayAnnualizedVol)} detail={overviewDetails.annualizedVol}/>
-      <StatCard label="Systematic Vol" value={fmt.pct(displaySystematicVol)} detail={overviewDetails.systematicVol}/>
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <StatCard label="Portfolio NAV" value={fmt.usdExact(liveBookSnapshot.nav)} sub={navSub} icon={DollarSign} detail={overviewDetails.portfolioNav} />
+      <StatCard
+        label="Day P&L"
+        value={fmt.usdExact(liveBookSnapshot.dayPnl)}
+        sub={`${fmt.pct(liveBookSnapshot.dayReturn)} · Live`}
+        trend={liveBookSnapshot.dayPnl == null ? undefined : (liveBookSnapshot.dayPnl >= 0 ? "up" : "down")}
+        color={liveBookSnapshot.dayPnl == null ? "text-slate-700" : (liveBookSnapshot.dayPnl >= 0 ? "text-emerald-700" : "text-red-600")}
+        icon={ArrowRightLeft}
+        detail={overviewDetails.dayPnl}
+      />
+      <StatCard
+        label="Since-Inception Return"
+        value={fmt.pct(weeklyPerformanceSnapshot.cumulativePortfolio)}
+        sub={historyAsOf}
+        trend={weeklyPerformanceSnapshot.cumulativePortfolio >= 0 ? "up" : "down"}
+        color={weeklyPerformanceSnapshot.cumulativePortfolio >= 0 ? "text-emerald-700" : "text-red-600"}
+        icon={BarChart3}
+        detail={overviewDetails.sinceInceptionReturn}
+      />
+      <StatCard
+        label="Excess Return"
+        value={fmt.pct(weeklyPerformanceSnapshot.excessReturn)}
+        sub={historyAsOf}
+        trend={weeklyPerformanceSnapshot.excessReturn >= 0 ? "up" : "down"}
+        color={weeklyPerformanceSnapshot.excessReturn >= 0 ? "text-emerald-700" : "text-red-600"}
+        icon={TrendingUp}
+        detail={overviewDetails.excessReturn}
+      />
+      <StatCard
+        label="Current Drawdown"
+        value={fmt.pct(weeklyPerformanceSnapshot.currentDrawdown)}
+        sub={`Max DD ${fmt.pct(weeklyPerformanceSnapshot.maxDrawdown)}`}
+        trend={weeklyPerformanceSnapshot.currentDrawdown >= 0 ? "up" : "down"}
+        color={weeklyPerformanceSnapshot.currentDrawdown >= 0 ? "text-emerald-700" : "text-red-600"}
+        icon={AlertTriangle}
+        detail={overviewDetails.currentDrawdown}
+      />
+      <StatCard
+        label="Portfolio Beta"
+        value={liveRiskSnapshot.beta == null ? "—" : fmt.num(liveRiskSnapshot.beta)}
+        sub={liveRiskSnapshot.betaStatus}
+        icon={Shield}
+        detail={overviewDetails.portfolioBeta}
+      />
+      <StatCard
+        label="Tracking Error"
+        value={liveRiskSnapshot.trackingError == null ? "—" : fmt.pct(liveRiskSnapshot.trackingError)}
+        sub={liveRiskSnapshot.trackingErrorStatus}
+        icon={Activity}
+        detail={overviewDetails.trackingError}
+      />
+      <StatCard
+        label="Stop-Loss Alerts"
+        value={stopLossSnapshot.alertCount}
+        sub={stopLossSub}
+        color={stopLossSnapshot.breachedCount > 0 ? "text-red-600" : stopLossSnapshot.warningCount > 0 ? "text-amber-600" : "text-emerald-700"}
+        icon={AlertCircle}
+        detail={overviewDetails.stopLossAlerts}
+      />
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Portfolio Allocation</h3>
         <div className="flex items-center gap-4">
-          <ResponsiveContainer width="55%" height={260}><PieChart><Pie data={bookSummary.portfolioAllocation} cx="50%" cy="50%" innerRadius={50} outerRadius={95} paddingAngle={2} dataKey="value" labelLine={false}>{bookSummary.portfolioAllocation.map((e,i)=><Cell key={i} fill={e.fill} stroke="#fff" strokeWidth={2}/>)}</Pie><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/></PieChart></ResponsiveContainer>
+          <ResponsiveContainer width="55%" height={260}><PieChart><Pie data={liveBookSnapshot.bookSummary.portfolioAllocation} cx="50%" cy="50%" innerRadius={50} outerRadius={95} paddingAngle={2} dataKey="value" labelLine={false}>{liveBookSnapshot.bookSummary.portfolioAllocation.map((e,i)=><Cell key={i} fill={e.fill} stroke="#fff" strokeWidth={2}/>)}</Pie><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/></PieChart></ResponsiveContainer>
           <div className="w-[45%] space-y-1.5 max-h-[260px] overflow-y-auto pr-1">{allocationLegend.map((t,i)=><div key={i} className="flex items-center gap-2"><span className="w-3 h-3 rounded-sm flex-shrink-0" style={{backgroundColor:t.fill}}/><span className="text-xs text-slate-700 flex-1 truncate">{t.name}</span><span className="text-xs font-semibold text-slate-800 tabular-nums">{fmt.pct(t.value,1)}</span></div>)}</div>
         </div></Card>
       <NewsFeed tickers={tickers}/>
       <Card className="p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-slate-700">Cumulative Return</h3>
+          <h3 className="text-sm font-semibold text-slate-700">Historical Performance</h3>
           <div className="flex items-center gap-2">
             <TabButton active={returnView==="weekly"} onClick={()=>setReturnView("weekly")}>Weekly</TabButton>
             <TabButton active={returnView==="daily"} onClick={()=>setReturnView("daily")}>Daily (20D)</TabButton>
           </div>
         </div>
-        <ResponsiveContainer width="100%" height={260}><ComposedChart data={cumData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer>
+        <ResponsiveContainer width="100%" height={260}><ComposedChart data={chartPerformanceSnapshot.cumulativeData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer>
       </Card>
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">PnL by Holding (Top/Bottom 5)</h3>
+      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Open P&L Drivers (Top/Bottom 5)</h3>
         <ResponsiveContainer width="100%" height={260}><BarChart data={pnlChart}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="ticker" tick={{fontSize:9}}/><YAxis tickFormatter={v=>`$${(v/1000).toFixed(0)}k`} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.usd(v)}/>}/><Bar dataKey="pnlDollar" name="PnL $" radius={[4,4,0,0]}>{pnlChart.map((e,i)=><Cell key={i} fill={e.pnlDollar>=0?"#059669":"#dc2626"}/>)}</Bar></BarChart></ResponsiveContainer></Card>
     </div>
-    {exited.length > 0 && <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Realized P&L Summary ({exited.length} exits = {fmt.usd(totalRealizedPnl)})</h3>
+    {liveBookSnapshot.exited.length > 0 && <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">P&L Decomposition ({liveBookSnapshot.exited.length} exits = {fmt.usd(liveBookSnapshot.totalRealizedPnl)})</h3>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Open P&L</p>
+          <p className={`mt-1 text-lg font-bold ${liveBookSnapshot.totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usdExact(liveBookSnapshot.totalUnrealizedPnl)}</p>
+          <p className="text-xs text-slate-500">{fmt.pct(liveBookSnapshot.nav > 0 ? liveBookSnapshot.totalUnrealizedPnl / liveBookSnapshot.nav : 0)} of live NAV</p>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Realized P&L</p>
+          <p className={`mt-1 text-lg font-bold ${liveBookSnapshot.totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usdExact(liveBookSnapshot.totalRealizedPnl)}</p>
+          <p className="text-xs text-slate-500">{fmt.pct(liveBookSnapshot.nav > 0 ? liveBookSnapshot.totalRealizedPnl / liveBookSnapshot.nav : 0)} of live NAV</p>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Current Total P&L</p>
+          <p className={`mt-1 text-lg font-bold ${liveBookSnapshot.totalPnl >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usdExact(liveBookSnapshot.totalPnl)}</p>
+          <p className="text-xs text-slate-500">{fmt.pct(liveBookSnapshot.nav > 0 ? liveBookSnapshot.totalPnl / liveBookSnapshot.nav : 0)} of live NAV</p>
+        </div>
+      </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-        <div className="bg-emerald-50 rounded-lg p-3 text-center"><p className="text-xs text-emerald-600">Winners</p><p className="text-lg font-bold text-emerald-700">{exited.filter(h=>h.pnlDollar>0).length}</p></div>
-        <div className="bg-red-50 rounded-lg p-3 text-center"><p className="text-xs text-red-600">Losers</p><p className="text-lg font-bold text-red-700">{exited.filter(h=>h.pnlDollar<0).length}</p></div>
-        <div className="bg-emerald-50 rounded-lg p-3 text-center"><p className="text-xs text-emerald-600">Gains</p><p className="text-lg font-bold text-emerald-700">{fmt.usd(exited.filter(h=>h.pnlDollar>0).reduce((s,h)=>s+h.pnlDollar,0))}</p></div>
-        <div className="bg-red-50 rounded-lg p-3 text-center"><p className="text-xs text-red-600">Losses</p><p className="text-lg font-bold text-red-700">{fmt.usd(exited.filter(h=>h.pnlDollar<0).reduce((s,h)=>s+h.pnlDollar,0))}</p></div>
+        <div className="bg-emerald-50 rounded-lg p-3 text-center"><p className="text-xs text-emerald-600">Winners</p><p className="text-lg font-bold text-emerald-700">{liveBookSnapshot.exited.filter(h=>h.pnlDollar>0).length}</p></div>
+        <div className="bg-red-50 rounded-lg p-3 text-center"><p className="text-xs text-red-600">Losers</p><p className="text-lg font-bold text-red-700">{liveBookSnapshot.exited.filter(h=>h.pnlDollar<0).length}</p></div>
+        <div className="bg-emerald-50 rounded-lg p-3 text-center"><p className="text-xs text-emerald-600">Gains</p><p className="text-lg font-bold text-emerald-700">{fmt.usd(liveBookSnapshot.exited.filter(h=>h.pnlDollar>0).reduce((s,h)=>s+h.pnlDollar,0))}</p></div>
+        <div className="bg-red-50 rounded-lg p-3 text-center"><p className="text-xs text-red-600">Losses</p><p className="text-lg font-bold text-red-700">{fmt.usd(liveBookSnapshot.exited.filter(h=>h.pnlDollar<0).reduce((s,h)=>s+h.pnlDollar,0))}</p></div>
       </div></Card>}
   </div>;
 }
@@ -1864,16 +2259,17 @@ function HoldingsPage({ holdings, setHoldings, settings, setSettings, dailyHisto
 
   const handleSave = async () => { setSS("saving"); await setHoldings(holdings); setTimeout(()=>setSS("saved"),300); setTimeout(()=>setSS(null),2500); };
 
-  const holdingsSnapshot = useMemo(() => computeHoldings(holdings, settings), [holdings, settings]);
+  const holdingsSnapshot = useMemo(() => buildLiveBookSnapshot(holdings, settings, dailyHistory), [holdings, settings, dailyHistory]);
   const {
-    totalVal,
+    nav: totalVal,
     cashBalance,
     computed: activeComputed,
     exited,
     totalRealizedPnl,
     active,
+    bookSummary,
+    activeStockCount,
   } = holdingsSnapshot;
-  const bookSummary = summarizeActiveBook(activeComputed, cashBalance, totalVal);
   const themes = ["All",...new Set(holdings.map(h=>h.theme))];
   const totalRealized = totalRealizedPnl;
 
@@ -1918,15 +2314,14 @@ function HoldingsPage({ holdings, setHoldings, settings, setSettings, dailyHisto
   const editableFields=["ticker","company","theme","buyPrice","currentPrice","shares","stopLossPct","marketBeta","status","entryDate","exitDate","notes"];
   const numericFields=["buyPrice","currentPrice","shares","stopLossPct","marketBeta"];
 
-  const activeCount = active.filter((holding) => holding.theme !== "Benchmark").length;
+  const activeCount = activeStockCount;
   const exitedCount = exited.length;
   const benchmarkTotal = bookSummary.benchmarkValue;
   const stockTotal = bookSummary.stockValue;
   const portfolioTotal = bookSummary.portfolioTotal;
   const sectionTotals = bookSummary.stockThemeTotals;
-  const trackedDailyHistory = useMemo(() => normalizeDailyHistoryRows(dailyHistory), [dailyHistory]);
-  const latestTrackedBalance = trackedDailyHistory.at(-1) || null;
-  const liveToTrackerGap = latestTrackedBalance ? portfolioTotal - latestTrackedBalance.portfolioValue : null;
+  const latestTrackedBalance = holdingsSnapshot.latestTrackedBalance;
+  const liveToTrackerGap = holdingsSnapshot.liveToTrackerGap;
   const importFidelityFile = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -2290,13 +2685,16 @@ function AttributionSheetTable({ title, periodLabel, totalLabel, betaLabel, shee
 
 function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings, risk }) {
   const [returnView, setReturnView] = useState("weekly");
-  const { computed, exited, totalVal, liveDailyReturn, liveBenchmarkReturn } = computeHoldings(holdings, settings);
-  const liveDailyHistory = buildLiveDailyHistoryRows(dailyHistory, {
-    portfolioValue: totalVal,
-    dailyReturn: liveDailyReturn,
-    benchmarkReturn: liveBenchmarkReturn,
-  });
-  const activeStocks = computed.filter((holding) => holding.theme !== "Benchmark");
+  const liveBookSnapshot = useMemo(
+    () => buildLiveBookSnapshot(holdings, settings, dailyHistory),
+    [holdings, settings, dailyHistory],
+  );
+  const performanceSnapshot = useMemo(
+    () => buildHistoricalPerformanceSnapshot(weeklyHistory, dailyHistory, liveBookSnapshot, returnView),
+    [weeklyHistory, dailyHistory, liveBookSnapshot, returnView],
+  );
+  const { computed, exited, nav: totalVal } = liveBookSnapshot;
+  const activeStocks = liveBookSnapshot.activeStocks;
   const allHoldings = [
     ...computed.map((holding) => ({
       ...holding,
@@ -2338,25 +2736,19 @@ function ReturnsPage({ holdings, weeklyHistory, dailyHistory, settings, risk }) 
     })
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
 
-  const historyRows = selectReturnHistory(returnView, weeklyHistory, liveDailyHistory);
-  const chartData = addHistoryLabels(historyRows, returnView).map((row) => ({
-    ...row,
-    excessReturn: (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0),
-    explainedReturn: Number(row.marketContrib || 0),
-    selectionReturn: Number(row.alpha || 0),
-  }));
-  const cumulativeData = buildCumulativeReturnSeries(historyRows).map((row, index) => ({ ...row, label: chartData[index]?.label }));
-  const cumulativePortfolio = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].portfolio : 0;
-  const cumulativeBenchmark = cumulativeData.length ? cumulativeData[cumulativeData.length - 1].benchmark : 0;
-  const excessReturn = cumulativePortfolio - cumulativeBenchmark;
-  const bestWorstSample = returnView === "weekly" && chartData.length > 5 ? chartData.slice(5) : chartData;
-  const bestPeriod = bestWorstSample.length ? [...bestWorstSample].sort((a, b) => b.portfolioReturn - a.portfolioReturn)[0] : null;
-  const worstPeriod = bestWorstSample.length ? [...bestWorstSample].sort((a, b) => a.portfolioReturn - b.portfolioReturn)[0] : null;
-  const historyTable = [...chartData].reverse();
-  const hitRate = chartData.length ? chartData.filter((row) => row.portfolioReturn > 0).length / chartData.length : 0;
-  const drawdownSeries = buildReturnDrawdownSeries(chartData);
-  const portfolioDrawdown = summarizeReturnDrawdown(drawdownSeries, "portfolioDrawdown");
-  const benchmarkDrawdown = summarizeReturnDrawdown(drawdownSeries, "benchmarkDrawdown");
+  const historyRows = performanceSnapshot.historyRows;
+  const chartData = performanceSnapshot.chartData;
+  const cumulativeData = performanceSnapshot.cumulativeData;
+  const cumulativePortfolio = performanceSnapshot.cumulativePortfolio;
+  const cumulativeBenchmark = performanceSnapshot.cumulativeBenchmark;
+  const excessReturn = performanceSnapshot.excessReturn;
+  const bestPeriod = performanceSnapshot.bestPeriod;
+  const worstPeriod = performanceSnapshot.worstPeriod;
+  const historyTable = performanceSnapshot.historyTable;
+  const hitRate = performanceSnapshot.hitRate;
+  const drawdownSeries = performanceSnapshot.drawdownSeries;
+  const portfolioDrawdown = performanceSnapshot.portfolioDrawdown;
+  const benchmarkDrawdown = performanceSnapshot.benchmarkDrawdown;
   const themeWeeklyAttribution = buildWeeklyContributionByGroup(activeStocks, "theme");
   const holdingDrivers = [...activeStocks]
     .map((holding) => ({
@@ -2798,12 +3190,13 @@ function RiskPage({ settings, risk }) {
 // ═══════════════════════════════════════════════════════════════════
 function StopLossPage({ holdings, settings }) {
   const [filter,setF]=useState("all");
-  const active=holdings.filter(h=>h.status==="active"&&h.theme!=="Benchmark");
-  const data=active.map(h=>{const sl=h.buyPrice*(1-h.stopLossPct);const dist=h.currentPrice>0?(h.currentPrice-sl)/h.currentPrice:1;const st=h.currentPrice<=sl?"BREACH":dist<settings.stopLossWarningBuffer?"WARNING":"OK";return{...h,slPrice:sl,distToSl:dist,alertStatus:st};});
+  const stopLossSnapshot = useMemo(() => buildStopLossSnapshot(holdings, settings), [holdings, settings]);
+  const active = stopLossSnapshot.active;
+  const data = stopLossSnapshot.rows;
   const filtered=filter==="all"?data:filter==="BREACH"?data.filter(h=>h.alertStatus==="BREACH"):filter==="WARNING"?data.filter(h=>h.alertStatus==="WARNING"):data.filter(h=>h.theme===filter);
-  const bc=data.filter(h=>h.alertStatus==="BREACH").length;const wc=data.filter(h=>h.alertStatus==="WARNING").length;
+  const bc=stopLossSnapshot.breachedCount;const wc=stopLossSnapshot.warningCount;
   const themes=[...new Set(active.map(h=>h.theme))];
-  const avgStopLossPct = data.length ? data.reduce((sum, row) => sum + (Number(row.stopLossPct) || 0), 0) / data.length : 0;
+  const avgStopLossPct = stopLossSnapshot.avgStopLossPct;
 
   return <div className="space-y-6">
     <SectionHeader title="Stop-Loss Monitoring" subtitle="4σ framework"/>
@@ -2851,10 +3244,11 @@ function StopLossPage({ holdings, settings }) {
 // TEAM REPORT — save, upload, google doc
 // ═══════════════════════════════════════════════════════════════════
 function TeamReportPage({ holdings, settings, report, setReport, reportMeta, setReportMeta, risk }) {
-  const {totalVal,computed,totalRealizedPnl}=computeHoldings(holdings, settings);const pb=calc.portfolioBeta(computed);
-  const liveRiskMetrics = risk?.analytics?.metrics || null;
-  const betaPending = !liveRiskMetrics && !risk?.error && (risk?.isLoading || risk?.isRefreshing);
-  const reportBeta = betaPending ? null : (liveRiskMetrics?.portfolioBeta ?? pb);
+  const liveBookSnapshot = useMemo(() => buildLiveBookSnapshot(holdings, settings), [holdings, settings]);
+  const liveRiskSnapshot = useMemo(() => buildLiveRiskSnapshot(risk), [risk]);
+  const totalVal = liveBookSnapshot.nav;
+  const totalRealizedPnl = liveBookSnapshot.totalRealizedPnl;
+  const reportBeta = liveRiskSnapshot.beta;
   const [ss,setSS]=useState(null);const [uf,setUF]=useState(null);const [gUrl,setGUrl]=useState(reportMeta?.docUrl||"");const [sUrl,setSUrl]=useState(reportMeta?.docUrl||"");const [showDoc,setSD]=useState(!!reportMeta?.docUrl);const [docEdit,setDE]=useState(!reportMeta?.docUrl);const [upEdit,setUE]=useState(!reportMeta?.uploadedFileName);const fr=useRef(null);
 
   const save=async()=>{setSS("saving");await setReport(report);await setReportMeta({...reportMeta,docUrl:sUrl||gUrl,uploadedFileName:uf?.name||reportMeta?.uploadedFileName});setTimeout(()=>setSS("saved"),300);setTimeout(()=>setSS(null),2500);};
@@ -2869,7 +3263,7 @@ function TeamReportPage({ holdings, settings, report, setReport, reportMeta, set
       </div>
     </SectionHeader>
     <Card className="p-6"><div className="border-b-2 border-slate-800 pb-4 mb-4 text-center"><h1 className="text-xl font-bold text-slate-800">NYU Stern MIF</h1><p className="text-sm text-slate-500 mt-1">{new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}</p></div>
-      <div className="grid grid-cols-4 gap-4 text-center">{[{l:"Value",v:fmt.usd(totalVal)},{l:"β",v:reportBeta == null ? "—" : fmt.num(reportBeta),sub:betaPending?"Loading 5Y market regression...":liveRiskMetrics?`${liveRiskMetrics.betaObservations || liveRiskMetrics.observations}d 5Y market regression`:"Holdings-weighted fallback"},{l:"Active",v:computed.filter((holding)=>holding.theme!=="Benchmark").length},{l:"Realized PnL",v:fmt.usd(totalRealizedPnl)}].map(s=><div key={s.l} className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-500">{s.l}</p><p className="text-lg font-bold text-slate-800">{s.v}</p>{s.sub?<p className="mt-1 text-[10px] text-slate-500">{s.sub}</p>:null}</div>)}</div></Card>
+      <div className="grid grid-cols-4 gap-4 text-center">{[{l:"Value",v:fmt.usd(totalVal)},{l:"β",v:reportBeta == null ? "—" : fmt.num(reportBeta),sub:liveRiskSnapshot.betaStatus},{l:"Active",v:liveBookSnapshot.activeStockCount},{l:"Realized PnL",v:fmt.usd(totalRealizedPnl)}].map(s=><div key={s.l} className="bg-slate-50 rounded-lg p-3"><p className="text-xs text-slate-500">{s.l}</p><p className="text-lg font-bold text-slate-800">{s.v}</p>{s.sub?<p className="mt-1 text-[10px] text-slate-500">{s.sub}</p>:null}</div>)}</div></Card>
     <Card className="p-5"><h3 className="text-sm font-semibold text-slate-700 mb-3">Upload Document</h3>
       {upEdit?<div><input ref={fr} type="file" accept=".pdf,.doc,.docx" onChange={onFile} className="hidden"/><button onClick={()=>fr.current?.click()} className="flex items-center gap-2 px-4 py-3 border-2 border-dashed rounded-lg text-sm text-slate-600 hover:border-blue-400 w-full justify-center"><Upload size={18}/> Upload PDF / DOCX</button>
         {uf && <div className="mt-3 flex items-center gap-2"><div className="flex-1 p-2.5 bg-slate-50 rounded-lg flex items-center gap-2"><FileText size={16} className="text-blue-500"/><span className="text-sm font-medium truncate">{uf.name}</span></div><button onClick={()=>setUE(false)} className="px-3 py-2 bg-emerald-600 text-white text-xs rounded-md"><Save size={12}/></button></div>}
@@ -2962,7 +3356,7 @@ export default function App() {
         </header>
         )}
         <main className={`flex-1 min-h-0 ${page==='catalyst'?'overflow-hidden p-0 bg-[#0f1117]':'overflow-y-auto p-6'} print:p-0`}>
-          {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory} risk={risk}/>}
+          {page==="overview" && <OverviewPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory} risk={risk} lastPriceUpdate={db.lastPriceUpdate}/>}
           {page==="holdings" && <HoldingsPage holdings={db.holdings} setHoldings={db.setHoldings} settings={db.settings} setSettings={db.setSettings} dailyHistory={db.dailyHistory} priceLoading={db.priceLoading} onRefreshPrices={db.refreshPrices}/>}
           {page==="returns" && <ReturnsPage holdings={db.holdings} settings={db.settings} weeklyHistory={db.weeklyHistory} dailyHistory={db.dailyHistory} risk={risk}/>}
           {page==="risk" && <RiskPage settings={db.settings} risk={risk}/>}
