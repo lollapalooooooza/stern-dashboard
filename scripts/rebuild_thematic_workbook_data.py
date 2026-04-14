@@ -430,6 +430,44 @@ def download_latest_closes(tickers):
     return prices
 
 
+def download_historical_closes(tickers, start_date, end_date):
+    tickers = sorted({ticker for ticker in tickers if ticker})
+    if not tickers:
+        return {}
+
+    history = yf.download(
+        tickers,
+        start=start_date,
+        end=end_date,
+        auto_adjust=False,
+        progress=False,
+        group_by="ticker",
+        threads=False,
+    )
+    if history is None or getattr(history, "empty", False):
+        return {}
+
+    prices_by_date = {}
+    columns = getattr(history, "columns", None)
+    nlevels = getattr(columns, "nlevels", 1)
+    if len(tickers) == 1 and nlevels == 1:
+        close_series = history["Close"].dropna()
+        for timestamp, value in close_series.items():
+            prices_by_date[timestamp.strftime("%Y-%m-%d")] = {tickers[0]: float(value)}
+        return prices_by_date
+
+    if nlevels > 1:
+        first_level = set(history.columns.get_level_values(0))
+        for ticker in tickers:
+            if ticker not in first_level:
+                continue
+            close_series = history[ticker]["Close"].dropna()
+            for timestamp, value in close_series.items():
+                row = prices_by_date.setdefault(timestamp.strftime("%Y-%m-%d"), {})
+                row[ticker] = float(value)
+    return prices_by_date
+
+
 def date_from_filename(path):
     match = re.search(r"(\d{2})-(\d{2})-(\d{4})", path.name)
     if not match:
@@ -519,18 +557,30 @@ def build_active_rows(
     valuation_date,
     previous_week_date,
     supplemental_prices,
+    snapshot_price_rows=None,
+    snapshot_price_date=None,
+    snapshot_previous_week_date=None,
 ):
+    snapshot_prices = snapshot_price_rows.get(snapshot_price_date, {}) if snapshot_price_rows and snapshot_price_date else {}
+    snapshot_previous_prices = (
+        snapshot_price_rows.get(snapshot_previous_week_date, {})
+        if snapshot_price_rows and snapshot_previous_week_date
+        else {}
+    )
     current_shares_by_ticker = defaultdict(float)
     for row in active_rows:
         meta = find_metadata(row["ticker"], active_meta, any_meta)
         reference_price = (
-            price_rows.get(reference_date, {}).get(row["ticker"])
+            snapshot_prices.get(row["ticker"])
+            or snapshot_previous_prices.get(row["ticker"])
+            or price_rows.get(reference_date, {}).get(row["ticker"])
             or supplemental_prices.get(row["ticker"])
             or meta.get("currentPrice")
             or meta.get("buyPrice")
         )
         current_price = (
-            price_rows.get(valuation_date, {}).get(row["ticker"])
+            snapshot_prices.get(row["ticker"])
+            or price_rows.get(valuation_date, {}).get(row["ticker"])
             or supplemental_prices.get(row["ticker"])
             or meta.get("currentPrice")
             or reference_price
@@ -539,7 +589,11 @@ def build_active_rows(
             raise ValueError(f"Missing reference price for {row['ticker']}")
         if not current_price or current_price <= 0:
             raise ValueError(f"Missing valuation price for {row['ticker']}")
-        previous_price = price_rows[previous_week_date].get(row["ticker"]) or current_price
+        previous_price = (
+            snapshot_previous_prices.get(row["ticker"])
+            or price_rows.get(previous_week_date, {}).get(row["ticker"])
+            or current_price
+        )
         row["shares"] = row["currentValue"] / float(current_price)
         matched = row.get("matchedLedger")
         if row["pnl"]:
@@ -871,6 +925,18 @@ def main():
     valuation_date = reference_date
     previous_week_date = trading_sessions_back(sorted_price_dates, valuation_date, 5)
     snapshot_dt = date.fromisoformat(snapshot_date)
+    snapshot_price_rows = download_historical_closes(
+        {row["ticker"] for row in active_rows},
+        (snapshot_dt - timedelta(days=10)).isoformat(),
+        (snapshot_dt + timedelta(days=2)).isoformat(),
+    )
+    snapshot_price_dates = sorted(snapshot_price_rows)
+    snapshot_price_date = nearest_available_date(snapshot_price_dates, snapshot_date) if snapshot_price_dates else None
+    snapshot_previous_week_date = (
+        trading_sessions_back(snapshot_price_dates, snapshot_price_date, 5)
+        if snapshot_price_date and len(snapshot_price_dates) > 1
+        else None
+    )
 
     match_active_ledger_rows(active_rows, ledger_rows)
     missing_price_tickers = sorted(
@@ -890,6 +956,9 @@ def main():
         valuation_date,
         previous_week_date,
         supplemental_prices,
+        snapshot_price_rows=snapshot_price_rows,
+        snapshot_price_date=snapshot_price_date,
+        snapshot_previous_week_date=snapshot_previous_week_date,
     )
     scale_by_ticker = build_scale_map(ledger_rows, current_shares_by_ticker)
 
@@ -960,7 +1029,7 @@ def main():
         latest_balance = balance_rows[-1]
         summary = {
             "snapshotDate": snapshot_date,
-            "referenceDate": reference_date,
+            "referenceDate": snapshot_price_date or reference_date,
             "stockValue": stock_value,
             "stockPnl": sum(row[19] for row in active_db_rows),
             "benchmarkValue": benchmark_value,
@@ -986,7 +1055,7 @@ def main():
         portfolio_start_value = float(existing_summary.get("portfolioStartValue") or daily_rows[0]["portfolioValue"])
         summary = {
             "snapshotDate": snapshot_date,
-            "referenceDate": reference_date,
+            "referenceDate": snapshot_price_date or reference_date,
             "stockValue": stock_value,
             "stockPnl": sum(row[19] for row in active_db_rows),
             "benchmarkValue": benchmark_value,
