@@ -57,6 +57,17 @@ const getThemeColor = (theme, i) => THEME_COLORS[theme] || CHART_COLORS[i % CHAR
 
 const GROUP_COLORS = { thematic:"#2563eb", opportunistic:"#7c3aed", systematic:"#059669", bond:"#d97706" };
 const GROUP_LABELS = { thematic:"Thematic", opportunistic:"Opportunistic", systematic:"Systematic", bond:"Bond" };
+const OVERVIEW_RANGE_OPTIONS = [
+  { key: "1M", label: "1M" },
+  { key: "3M", label: "3M" },
+  { key: "6M", label: "6M" },
+  { key: "YTD", label: "YTD" },
+  { key: "1Y", label: "1Y" },
+  { key: "SI", label: "Since Inception" },
+  { key: "CUSTOM", label: "Custom" },
+];
+const HEATMAP_MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const BENCHMARK_OPTIONS = [{ value: "SP500", label: "S&P 500" }];
 
 const hasMetricValue = (value) => value !== null && value !== undefined && value !== "";
 const asNumber = (value, fallback = 0) => {
@@ -322,6 +333,282 @@ function addHistoryLabels(rows, view) {
   }));
 }
 
+function compoundReturns(values) {
+  return (values || []).reduce((nav, value) => nav * (1 + (Number(value) || 0)), 1) - 1;
+}
+
+function stdDev(values) {
+  const cleaned = (values || []).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  if (cleaned.length < 2) return 0;
+  const mean = cleaned.reduce((sum, value) => sum + value, 0) / cleaned.length;
+  const variance = cleaned.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / (cleaned.length - 1);
+  return Math.sqrt(Math.max(variance, 0));
+}
+
+function covariance(left, right) {
+  const xs = (left || []).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  const ys = (right || []).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  const count = Math.min(xs.length, ys.length);
+  if (count < 2) return 0;
+  const x = xs.slice(0, count);
+  const y = ys.slice(0, count);
+  const meanX = x.reduce((sum, value) => sum + value, 0) / count;
+  const meanY = y.reduce((sum, value) => sum + value, 0) / count;
+  return x.reduce((sum, value, index) => sum + ((value - meanX) * (y[index] - meanY)), 0) / (count - 1);
+}
+
+function correlation(left, right) {
+  const leftStd = stdDev(left);
+  const rightStd = stdDev(right);
+  if (leftStd === 0 || rightStd === 0) return 0;
+  return covariance(left, right) / (leftStd * rightStd);
+}
+
+function annualizeReturn(totalReturn, periods) {
+  if (!Number.isFinite(totalReturn) || periods <= 0) return 0;
+  const base = 1 + totalReturn;
+  if (base <= 0) return -1;
+  return (base ** (252 / periods)) - 1;
+}
+
+function dateToIso(input) {
+  if (!input) return "";
+  if (typeof input === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input)) return input;
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function shiftIsoDate(isoDate, { months = 0, years = 0, days = 0 } = {}) {
+  const date = new Date(`${isoDate}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return isoDate;
+  if (months) date.setMonth(date.getMonth() + months);
+  if (years) date.setFullYear(date.getFullYear() + years);
+  if (days) date.setDate(date.getDate() + days);
+  return dateToIso(date);
+}
+
+function startOfYearIso(isoDate) {
+  const date = new Date(`${isoDate}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return isoDate;
+  return `${date.getFullYear()}-01-01`;
+}
+
+function filterRowsByOverviewRange(rows, rangeKey, customRange = {}) {
+  const normalized = (rows || []).filter((row) => row?.date).toSorted((left, right) => String(left.date).localeCompare(String(right.date)));
+  if (!normalized.length) return [];
+  const endDate = normalized.at(-1).date;
+  let startDate = normalized[0].date;
+
+  if (rangeKey === "1M") startDate = shiftIsoDate(endDate, { months: -1 });
+  else if (rangeKey === "3M") startDate = shiftIsoDate(endDate, { months: -3 });
+  else if (rangeKey === "6M") startDate = shiftIsoDate(endDate, { months: -6 });
+  else if (rangeKey === "YTD") startDate = startOfYearIso(endDate);
+  else if (rangeKey === "1Y") startDate = shiftIsoDate(endDate, { years: -1 });
+  else if (rangeKey === "CUSTOM") {
+    startDate = customRange.start ? dateToIso(customRange.start) : normalized[0].date;
+    const customEnd = customRange.end ? dateToIso(customRange.end) : endDate;
+    return normalized.filter((row) => row.date >= startDate && row.date <= customEnd);
+  }
+
+  return normalized.filter((row) => row.date >= startDate && row.date <= endDate);
+}
+
+function getPreviousComparableRows(allRows, currentRows) {
+  const normalized = (allRows || []).filter((row) => row?.date).toSorted((left, right) => String(left.date).localeCompare(String(right.date)));
+  if (!normalized.length || !currentRows?.length) return [];
+  const startIndex = normalized.findIndex((row) => row.date === currentRows[0].date);
+  if (startIndex <= 0) return [];
+  const priorCount = currentRows.length;
+  return normalized.slice(Math.max(0, startIndex - priorCount), startIndex);
+}
+
+function buildMonthlyReturnRows(rows) {
+  const buckets = new Map();
+  for (const row of rows || []) {
+    if (!row?.date) continue;
+    const year = Number(String(row.date).slice(0, 4));
+    const monthIndex = Number(String(row.date).slice(5, 7)) - 1;
+    const key = `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        key,
+        year,
+        monthIndex,
+        label: `${HEATMAP_MONTH_LABELS[monthIndex]} ${year}`,
+        portfolioReturns: [],
+        benchmarkReturns: [],
+      });
+    }
+    const bucket = buckets.get(key);
+    bucket.portfolioReturns.push(Number(row.portfolioReturn) || 0);
+    bucket.benchmarkReturns.push(Number(row.benchmarkReturn) || 0);
+  }
+  return [...buckets.values()]
+    .sort((left, right) => left.key.localeCompare(right.key))
+    .map((bucket) => {
+      const portfolioReturn = compoundReturns(bucket.portfolioReturns);
+      const benchmarkReturn = compoundReturns(bucket.benchmarkReturns);
+      return {
+        year: bucket.year,
+        monthIndex: bucket.monthIndex,
+        label: bucket.label,
+        portfolioReturn,
+        benchmarkReturn,
+        activeReturn: portfolioReturn - benchmarkReturn,
+      };
+    });
+}
+
+function buildMonthlyHeatmapMatrix(rows) {
+  const months = buildMonthlyReturnRows(rows);
+  const grouped = new Map();
+  for (const month of months) {
+    if (!grouped.has(month.year)) grouped.set(month.year, Array.from({ length: 12 }, () => null));
+    grouped.get(month.year)[month.monthIndex] = month;
+  }
+  return [...grouped.entries()]
+    .sort((left, right) => right[0] - left[0])
+    .map(([year, monthsByYear]) => ({ year, months: monthsByYear }));
+}
+
+function buildRollingMetricSeries(rows, window, project) {
+  const safeWindow = Math.max(3, window);
+  return (rows || []).map((row, index) => {
+    if (index + 1 < safeWindow) return null;
+    const slice = rows.slice(index + 1 - safeWindow, index + 1);
+    return { date: row.date, value: project(slice) };
+  }).filter(Boolean);
+}
+
+function computeCaptureRatio(rows, direction) {
+  const filtered = (rows || []).filter((row) => direction === "up" ? row.benchmarkReturn > 0 : row.benchmarkReturn < 0);
+  if (!filtered.length) return null;
+  const benchmarkCompound = compoundReturns(filtered.map((row) => row.benchmarkReturn));
+  if (benchmarkCompound === 0) return null;
+  const portfolioCompound = compoundReturns(filtered.map((row) => row.portfolioReturn));
+  return portfolioCompound / benchmarkCompound;
+}
+
+function computeRangePerformanceStats(rows, riskFreeRate = 0.04) {
+  const normalized = (rows || []).filter((row) => row?.date);
+  if (!normalized.length) {
+    return {
+      totalReturn: 0,
+      benchmarkReturn: 0,
+      activeReturn: 0,
+      annualizedReturn: 0,
+      annualizedBenchmarkReturn: 0,
+      annualizedVolatility: 0,
+      trackingError: 0,
+      sharpeRatio: null,
+      informationRatio: null,
+      maxDrawdown: 0,
+      beta: null,
+      alpha: null,
+      correlation: null,
+      downsideDeviation: 0,
+      sortinoRatio: null,
+      upCapture: null,
+      downCapture: null,
+      cumulativeData: [],
+      drawdownSeries: [],
+      rollingVolSeries: [],
+      rollingTrackingErrorSeries: [],
+    };
+  }
+
+  const totalReturn = compoundReturns(normalized.map((row) => row.portfolioReturn));
+  const benchmarkReturn = compoundReturns(normalized.map((row) => row.benchmarkReturn));
+  const activeReturn = totalReturn - benchmarkReturn;
+  const annualizedReturn = annualizeReturn(totalReturn, normalized.length);
+  const annualizedBenchmarkReturn = annualizeReturn(benchmarkReturn, normalized.length);
+  const annualizedVolatility = stdDev(normalized.map((row) => row.portfolioReturn)) * Math.sqrt(252);
+  const trackingError = stdDev(normalized.map((row) => (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0))) * Math.sqrt(252);
+  const downsideDeviation = stdDev(normalized.map((row) => Math.min(Number(row.portfolioReturn) || 0, 0))) * Math.sqrt(252);
+  const beta = (() => {
+    const variance = covariance(normalized.map((row) => row.benchmarkReturn), normalized.map((row) => row.benchmarkReturn));
+    if (variance === 0) return null;
+    return covariance(normalized.map((row) => row.portfolioReturn), normalized.map((row) => row.benchmarkReturn)) / variance;
+  })();
+  const correlationToBenchmark = correlation(normalized.map((row) => row.portfolioReturn), normalized.map((row) => row.benchmarkReturn));
+  const alpha = beta == null ? null : (annualizedReturn - (riskFreeRate + beta * (annualizedBenchmarkReturn - riskFreeRate)));
+  const sharpeRatio = annualizedVolatility > 0 ? (annualizedReturn - riskFreeRate) / annualizedVolatility : null;
+  const informationRatio = trackingError > 0 ? annualizeReturn(activeReturn, normalized.length) / trackingError : null;
+  const sortinoRatio = downsideDeviation > 0 ? (annualizedReturn - riskFreeRate) / downsideDeviation : null;
+  const cumulativeData = buildCumulativeReturnSeries(normalized).map((row, index) => ({
+    ...row,
+    date: normalized[index]?.date,
+    active: row.portfolio - row.benchmark,
+    label: fmt.shortDate(normalized[index]?.date),
+  }));
+  const drawdownSeries = buildReturnDrawdownSeries(normalized).map((row, index) => ({
+    ...row,
+    date: normalized[index]?.date,
+    label: fmt.shortDate(normalized[index]?.date),
+  }));
+  const maxDrawdown = drawdownSeries.reduce((worst, row) => Math.min(worst, row.portfolioDrawdown), 0);
+  const rollingVolSeries = buildRollingMetricSeries(normalized, Math.min(20, normalized.length), (slice) => stdDev(slice.map((row) => row.portfolioReturn)) * Math.sqrt(252));
+  const rollingTrackingErrorSeries = buildRollingMetricSeries(normalized, Math.min(20, normalized.length), (slice) => stdDev(slice.map((row) => (Number(row.portfolioReturn) || 0) - (Number(row.benchmarkReturn) || 0))) * Math.sqrt(252));
+
+  return {
+    totalReturn,
+    benchmarkReturn,
+    activeReturn,
+    annualizedReturn,
+    annualizedBenchmarkReturn,
+    annualizedVolatility,
+    trackingError,
+    sharpeRatio,
+    informationRatio,
+    maxDrawdown,
+    beta,
+    alpha,
+    correlationToBenchmark,
+    downsideDeviation,
+    sortinoRatio,
+    upCapture: computeCaptureRatio(normalized, "up"),
+    downCapture: computeCaptureRatio(normalized, "down"),
+    cumulativeData,
+    drawdownSeries,
+    rollingVolSeries,
+    rollingTrackingErrorSeries,
+  };
+}
+
+function buildConcentrationMetrics(activeStocks, nav, cashBalance) {
+  const sorted = [...(activeStocks || [])].sort((left, right) => (right.weight || 0) - (left.weight || 0));
+  const top5Weight = sorted.slice(0, 5).reduce((sum, holding) => sum + (holding.weight || 0), 0);
+  const top10Weight = sorted.slice(0, 10).reduce((sum, holding) => sum + (holding.weight || 0), 0);
+  const hhi = sorted.reduce((sum, holding) => sum + ((holding.weight || 0) ** 2), 0);
+  const largest = sorted[0] || null;
+  return {
+    top5Weight,
+    top10Weight,
+    hhi,
+    largestHolding: largest,
+    cashWeight: nav > 0 ? cashBalance / nav : 0,
+    activeCount: sorted.length,
+  };
+}
+
+function toCsv(rows) {
+  return rows.map((row) => row.map((cell) => {
+    const value = cell == null ? "" : String(cell);
+    return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  }).join(",")).join("\n");
+}
+
+function formatComparableDelta(current, previous, formatter) {
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return null;
+  const delta = current - previous;
+  const sign = delta > 0 ? "+" : "";
+  return `vs prior ${sign}${formatter(delta)}`;
+}
+
 function formatPriceUpdateLabel(payload) {
   const stamp = payload?.updated ? new Date(payload.updated) : new Date();
   return `${stamp.toLocaleTimeString()} (${payload?.count || 0})`;
@@ -536,8 +823,8 @@ function useRiskAnalytics(group, holdings) {
 
 const Card = ({ children, className = "" }) => <div className={`bg-white rounded-lg border border-slate-200 shadow-sm ${className}`}>{children}</div>;
 
-function downloadTextFile(filename, content) {
-  const blob = new Blob([content], { type: "text/x-python;charset=utf-8" });
+function downloadFile(filename, content, type = "text/plain;charset=utf-8") {
+  const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -622,7 +909,7 @@ function CalculationDetailButton({ detail }) {
   };
 
   const handleDownloadPython = () => {
-    downloadTextFile(detail.pythonFileName, detail.pythonSource);
+    downloadFile(detail.pythonFileName, detail.pythonSource, "text/x-python;charset=utf-8");
     setCopiedState("downloaded");
   };
 
@@ -671,7 +958,23 @@ function CalculationDetailButton({ detail }) {
   </>;
 }
 
-const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-700", tooltip, editable, onEdit, detail, compact = false }) => {
+function MiniSparkline({ values = [], color = "#1e3a5f" }) {
+  const cleaned = (values || []).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  if (cleaned.length < 2) return <div className="h-8 rounded-lg bg-slate-50"/>;
+  const min = Math.min(...cleaned);
+  const max = Math.max(...cleaned);
+  const range = max - min || 1;
+  const points = cleaned.map((value, index) => {
+    const x = (index / (cleaned.length - 1)) * 100;
+    const y = 100 - (((value - min) / range) * 100);
+    return `${x},${y}`;
+  }).join(" ");
+  return <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-8 w-full">
+    <polyline fill="none" stroke={color} strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" points={points}/>
+  </svg>;
+}
+
+const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-700", tooltip, editable, onEdit, detail, compact = false, delta, sparklineData, sparklineColor, footerLabel }) => {
   const [show, setShow] = useState(false);
   const [ev, setEv] = useState("");
   const [hoverOpen, setHoverOpen] = useState(false);
@@ -764,7 +1067,7 @@ const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-70
 
   const handleDownloadPython = (event) => {
     event.stopPropagation();
-    downloadTextFile(detail.pythonFileName, detail.pythonSource);
+    downloadFile(detail.pythonFileName, detail.pythonSource, "text/x-python;charset=utf-8");
     setCopied("downloaded");
   };
 
@@ -780,8 +1083,12 @@ const StatCard = ({ label, value, sub, icon: Icon, trend, color = "text-slate-70
           </div>
           {Icon && <div className={`rounded-lg bg-slate-50 ${compact ? "p-1.5" : "p-2"}`}><Icon size={compact ? 14 : 16} className="text-slate-400" /></div>}
         </div>
-        <div className={`${compact ? "min-h-[0.25rem] pt-1" : "min-h-[1rem] pt-2"}`}>
-          {hasDetail ? <p className="text-[10px] font-medium text-slate-400">Hover or click for formula</p> : null}
+        <div className={`${compact ? "min-h-[0.25rem] pt-1" : "min-h-[1rem] pt-2"} space-y-2`}>
+          {sparklineData?.length > 1 ? <MiniSparkline values={sparklineData} color={sparklineColor || (trend === "down" ? "#dc2626" : "#1e3a5f")}/> : null}
+          {(delta || footerLabel || hasDetail) ? <div className="flex items-center justify-between gap-2">
+            <p className={`text-[10px] font-medium ${delta ? (delta.startsWith("-") ? "text-red-500" : "text-emerald-600") : "text-slate-400"}`}>{delta || (hasDetail ? "Hover or click for formula" : " ")}</p>
+            {footerLabel ? <span className="text-[10px] text-slate-400">{footerLabel}</span> : null}
+          </div> : null}
         </div>
       </div>
     </Card>
@@ -861,6 +1168,197 @@ const ThemeBadge = ({ theme }) => {
 const TabButton = ({active,children,onClick}) => <button onClick={onClick} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${active?"bg-slate-800 text-white shadow-sm":"text-slate-600 hover:bg-slate-100"}`}>{children}</button>;
 
 const SectionHeader = ({title,subtitle,children}) => <div className="flex items-center justify-between mb-4"><div><h2 className="text-lg font-bold text-slate-800">{title}</h2>{subtitle && <p className="text-sm text-slate-500">{subtitle}</p>}</div>{children && <div className="flex items-center gap-2">{children}</div>}</div>;
+
+function OverviewHeaderBar({ range, setRange, customRange, setCustomRange, relativeView, setRelativeView, benchmark, setBenchmark, lastPriceUpdate, onExportCsv, onExportPdf, benchmarkOptions }) {
+  return <Card className="p-4">
+    <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+      <div>
+        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Overview Control Bar</p>
+        <h3 className="mt-1 text-xl font-bold text-slate-900">Overview</h3>
+        <p className="mt-1 text-sm text-slate-500">Institutional performance, benchmark-relative attribution, and risk monitoring in one screen.</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {lastPriceUpdate && <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-700">Updated {lastPriceUpdate}</span>}
+        <button onClick={onExportCsv} className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"><Download size={12}/> CSV</button>
+        <button onClick={onExportPdf} className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"><Printer size={12}/> PDF</button>
+      </div>
+    </div>
+    <div className="mt-4 grid gap-3 xl:grid-cols-[1.2fr_0.85fr_0.75fr]">
+      <div className="rounded-2xl border border-slate-200 p-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Date Range</p>
+        <div className="flex flex-wrap gap-1.5">
+          {OVERVIEW_RANGE_OPTIONS.map((option) => <button key={option.key} onClick={() => setRange(option.key)} className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${range === option.key ? "bg-slate-800 text-white shadow-sm" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>{option.label}</button>)}
+        </div>
+        {range === "CUSTOM" && <div className="mt-3 grid grid-cols-2 gap-2">
+          <input type="date" value={customRange.start} onChange={(event) => setCustomRange((current) => ({ ...current, start: event.target.value }))} className="rounded-md border border-slate-300 px-3 py-2 text-xs"/>
+          <input type="date" value={customRange.end} onChange={(event) => setCustomRange((current) => ({ ...current, end: event.target.value }))} className="rounded-md border border-slate-300 px-3 py-2 text-xs"/>
+        </div>}
+      </div>
+      <div className="rounded-2xl border border-slate-200 p-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Benchmark &amp; View</p>
+        <div className="flex flex-col gap-2">
+          <select value={benchmark} onChange={(event) => setBenchmark(event.target.value)} className="rounded-md border border-slate-300 px-3 py-2 text-xs text-slate-700">
+            {benchmarkOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-1">
+            <button onClick={() => setRelativeView(false)} className={`rounded px-3 py-1.5 text-xs font-medium ${!relativeView ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"}`}>Absolute</button>
+            <button onClick={() => setRelativeView(true)} className={`rounded px-3 py-1.5 text-xs font-medium ${relativeView ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"}`}>Relative</button>
+          </div>
+        </div>
+      </div>
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">View Context</p>
+        <p className="text-sm font-medium text-slate-800">{benchmarkOptions.find((option) => option.value === benchmark)?.label || "Benchmark"}</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">{relativeView ? "Charts and heatmap emphasize active return and spread versus benchmark." : "Charts show absolute portfolio and benchmark paths with benchmark-relative context in the tooltip."}</p>
+      </div>
+    </div>
+  </Card>;
+}
+
+function MonthlyReturnHeatmap({ matrix, relativeView }) {
+  const [hovered, setHovered] = useState(null);
+  const activeValue = hovered ? (relativeView ? hovered.activeReturn : hovered.portfolioReturn) : null;
+  return <Card className="p-4">
+    <div className="flex items-start justify-between gap-4 mb-4">
+      <div>
+        <h4 className="text-sm font-semibold text-slate-700">Monthly Return Heatmap</h4>
+        <p className="text-xs text-slate-500">{relativeView ? "Active return by month" : "Portfolio return by month"} with benchmark context on hover.</p>
+      </div>
+      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 min-w-[12rem]">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">{hovered ? hovered.label : "Hover a month"}</p>
+        <p className={`mt-1 text-base font-bold ${activeValue >= 0 ? "text-emerald-700" : "text-red-600"}`}>{hovered ? fmt.pct(relativeView ? hovered.activeReturn : hovered.portfolioReturn) : "—"}</p>
+        <p className="text-[11px] text-slate-500">{hovered ? `Benchmark ${fmt.pct(hovered.benchmarkReturn)} · Active ${fmt.pct(hovered.activeReturn)}` : "Portfolio / benchmark / active return"}</p>
+      </div>
+    </div>
+    <div className="overflow-x-auto">
+      <div className="min-w-[44rem]">
+        <div className="grid grid-cols-[5rem_repeat(12,minmax(0,1fr))] gap-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1">
+          <div/>
+          {HEATMAP_MONTH_LABELS.map((month) => <div key={month} className="px-2 py-1 text-center">{month}</div>)}
+        </div>
+        <div className="space-y-1">
+          {matrix.map((row) => <div key={row.year} className="grid grid-cols-[5rem_repeat(12,minmax(0,1fr))] gap-1">
+            <div className="flex items-center px-2 text-xs font-semibold text-slate-600">{row.year}</div>
+            {row.months.map((month, index) => {
+              const value = month ? (relativeView ? month.activeReturn : month.portfolioReturn) : null;
+              const intensity = value == null ? 0 : Math.min(Math.abs(value) / 0.12, 1);
+              const background = value == null
+                ? "rgba(241,245,249,0.9)"
+                : value >= 0
+                  ? `rgba(5,150,105,${0.14 + intensity * 0.56})`
+                  : `rgba(220,38,38,${0.14 + intensity * 0.56})`;
+              return <button
+                key={`${row.year}-${index}`}
+                type="button"
+                onMouseEnter={() => setHovered(month)}
+                onFocus={() => setHovered(month)}
+                onMouseLeave={() => setHovered(null)}
+                onBlur={() => setHovered(null)}
+                title={month ? `${month.label}: Portfolio ${fmt.pct(month.portfolioReturn)}, Benchmark ${fmt.pct(month.benchmarkReturn)}, Active ${fmt.pct(month.activeReturn)}` : "No data"}
+                className="h-10 rounded-md border border-white/70 text-[11px] font-semibold text-slate-800"
+                style={{ backgroundColor: background }}
+              >
+                {month ? fmt.pct(value, 1) : "—"}
+              </button>;
+            })}
+          </div>)}
+        </div>
+      </div>
+    </div>
+  </Card>;
+}
+
+function PMInsightsPanel({ insights }) {
+  if (!insights?.length) return null;
+  return <Card className="p-4">
+    <h4 className="text-sm font-semibold text-slate-700">PM Insights</h4>
+    <p className="mt-1 text-xs text-slate-500">Generated from current performance, attribution, concentration, and risk diagnostics.</p>
+    <ul className="mt-3 space-y-2">
+      {insights.map((insight) => <li key={insight} className="flex items-start gap-2 text-sm leading-6 text-slate-700"><span className="mt-2 h-1.5 w-1.5 rounded-full bg-slate-400"/><span>{insight}</span></li>)}
+    </ul>
+  </Card>;
+}
+
+function PerformanceSummaryCard({ summary }) {
+  const rows = [
+    { label: "YTD Return", value: fmt.pct(summary.ytdReturn), tone: summary.ytdReturn >= 0 ? "text-emerald-700" : "text-red-600" },
+    { label: "Since Inception", value: fmt.pct(summary.sinceInceptionReturn), tone: summary.sinceInceptionReturn >= 0 ? "text-emerald-700" : "text-red-600" },
+    { label: "Best Month", value: summary.bestMonth ? `${summary.bestMonth.label} · ${fmt.pct(summary.bestMonth.portfolioReturn)}` : "—", tone: "text-slate-800" },
+    { label: "Worst Month", value: summary.worstMonth ? `${summary.worstMonth.label} · ${fmt.pct(summary.worstMonth.portfolioReturn)}` : "—", tone: "text-slate-800" },
+    { label: "Hit Rate", value: fmt.pct(summary.hitRate), tone: "text-slate-800" },
+    { label: "Up Capture", value: summary.upCapture == null ? "—" : fmt.num(summary.upCapture, 2), tone: "text-slate-800" },
+    { label: "Down Capture", value: summary.downCapture == null ? "—" : fmt.num(summary.downCapture, 2), tone: "text-slate-800" },
+    { label: "Drawdown From Peak", value: fmt.pct(summary.currentDrawdown), tone: summary.currentDrawdown >= 0 ? "text-emerald-700" : "text-red-600" },
+  ];
+  return <Card className="p-4">
+    <h4 className="text-sm font-semibold text-slate-700">Performance Summary</h4>
+    <p className="mt-1 text-xs text-slate-500">YTD, since-inception, and capture stats from the current performance history.</p>
+    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {rows.map((row) => <div key={row.label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{row.label}</p>
+        <p className={`mt-1 text-sm font-bold ${row.tone}`}>{row.value}</p>
+      </div>)}
+    </div>
+  </Card>;
+}
+
+function HoldingsOverviewTable({ rows, search, setSearch, sortKey, sortDir, onSort, selectedTheme, clearTheme }) {
+  const columns = [
+    { key: "ticker", label: "Ticker" },
+    { key: "company", label: "Company" },
+    { key: "theme", label: "Theme" },
+    { key: "weight", label: "Weight", format: (value) => fmt.pct(value, 1) },
+    { key: "activeWeight", label: "Active Wt", format: (value) => fmt.pct(value, 1) },
+    { key: "currentPrice", label: "Price", format: (value) => fmt.usdExact(value) },
+    { key: "dailyReturn", label: "Daily %", format: (value) => fmt.pct(value, 1) },
+    { key: "totalReturnPct", label: "Total Return %", format: (value) => fmt.pct(value, 1) },
+    { key: "contributionToReturn", label: "Ctrb. Return", format: (value) => fmt.pct(value, 2) },
+    { key: "riskContribution", label: "Ctrb. Risk", format: (value) => value == null ? "—" : fmt.pct(value, 2) },
+    { key: "pnlDollar", label: "P/L", format: (value) => fmt.usd(value) },
+    { key: "positionValue", label: "Market Value", format: (value) => fmt.usd(value) },
+  ];
+  return <Card className="p-5">
+    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between mb-4">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700">Holdings Overview Table</h3>
+        <p className="text-xs text-slate-500">Filterable view of the live book with return and risk contribution columns.</p>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative">
+          <Search size={14} className="absolute left-2 top-2 text-slate-400"/>
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search holdings..." className="w-48 rounded-md border border-slate-300 py-1.5 pl-7 pr-3 text-sm"/>
+        </div>
+        {selectedTheme && <button onClick={clearTheme} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">Clear theme filter</button>}
+      </div>
+    </div>
+    <div className="max-h-[28rem] overflow-auto rounded-xl border border-slate-200">
+      <table className="w-full min-w-[78rem] text-xs">
+        <thead className="sticky top-0 z-10 bg-white">
+          <tr className="border-b border-slate-200 bg-slate-50">
+            {columns.map((column) => <th key={column.key} onClick={() => onSort(column.key)} className="cursor-pointer px-3 py-2 text-left font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-700">{column.label}{sortKey === column.key ? (sortDir === 1 ? " ↑" : " ↓") : ""}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => <tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50">
+            <td className="px-3 py-2 font-semibold text-slate-800">{row.ticker}</td>
+            <td className="px-3 py-2 text-slate-600">{row.company}</td>
+            <td className="px-3 py-2"><ThemeBadge theme={row.theme}/></td>
+            <td className="px-3 py-2 text-slate-600">{fmt.pct(row.weight, 1)}</td>
+            <td className={`px-3 py-2 font-medium ${row.activeWeight >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.activeWeight, 1)}</td>
+            <td className="px-3 py-2 text-slate-600">{fmt.usdExact(row.currentPrice)}</td>
+            <td className={`px-3 py-2 font-medium ${row.dailyReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.dailyReturn, 1)}</td>
+            <td className={`px-3 py-2 font-medium ${row.totalReturnPct >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.totalReturnPct, 1)}</td>
+            <td className={`px-3 py-2 font-medium ${row.contributionToReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.contributionToReturn, 2)}</td>
+            <td className={`px-3 py-2 font-medium ${row.riskContribution >= 0 ? "text-emerald-600" : row.riskContribution < 0 ? "text-red-500" : "text-slate-500"}`}>{row.riskContribution == null ? "—" : fmt.pct(row.riskContribution, 2)}</td>
+            <td className={`px-3 py-2 font-medium ${row.pnlDollar >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.usd(row.pnlDollar)}</td>
+            <td className="px-3 py-2 font-medium text-slate-800">{fmt.usd(row.positionValue)}</td>
+          </tr>)}
+          {!rows.length && <tr><td colSpan={12} className="px-3 py-8 text-center text-sm text-slate-500">No holdings match the current filter.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  </Card>;
+}
 
 const CustomTooltip = ({active,payload,label,formatter}) => {
   if(!active||!payload) return null;
@@ -2106,14 +2604,22 @@ function buildRiskStatDetails(analytics) {
 // OVERVIEW
 // ═══════════════════════════════════════════════════════════════════
 function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, lastPriceUpdate }) {
-  const [returnView, setReturnView] = useState("weekly");
+  const [range, setRange] = useState("YTD");
+  const [customRange, setCustomRange] = useState({ start: "", end: "" });
+  const [relativeView, setRelativeView] = useState(false);
+  const [benchmark, setBenchmark] = useState(BENCHMARK_OPTIONS[0]?.value || "SP500");
+  const [selectedTheme, setSelectedTheme] = useState(null);
+  const [holdingSearch, setHoldingSearch] = useState("");
+  const [holdingSortKey, setHoldingSortKey] = useState("contributionToReturn");
+  const [holdingSortDir, setHoldingSortDir] = useState(-1);
+
   const liveBookSnapshot = useMemo(
     () => buildLiveBookSnapshot(holdings, settings, dailyHistory),
     [holdings, settings, dailyHistory],
   );
-  const chartPerformanceSnapshot = useMemo(
-    () => buildHistoricalPerformanceSnapshot(weeklyHistory, dailyHistory, liveBookSnapshot, returnView),
-    [weeklyHistory, dailyHistory, liveBookSnapshot, returnView],
+  const dailyPerformanceSnapshot = useMemo(
+    () => buildHistoricalPerformanceSnapshot(weeklyHistory, dailyHistory, liveBookSnapshot, "daily"),
+    [weeklyHistory, dailyHistory, liveBookSnapshot],
   );
   const weeklyPerformanceSnapshot = useMemo(
     () => buildHistoricalPerformanceSnapshot(weeklyHistory, dailyHistory, liveBookSnapshot, "weekly"),
@@ -2130,120 +2636,955 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
     settings,
   }), [liveBookSnapshot, weeklyPerformanceSnapshot, liveRiskSnapshot, stopLossSnapshot, lastPriceUpdate, settings]);
 
-  const allocationLegend = [...liveBookSnapshot.bookSummary.portfolioAllocation].sort((a, b) => b.value - a.value);
-  const pnlSorted = [...liveBookSnapshot.activeStocks].sort((a, b) => b.pnlDollar - a.pnlDollar);
-  const pnlChart = [...pnlSorted.slice(0, 5), ...pnlSorted.slice(-5)];
-  const tickers = liveBookSnapshot.activeStocks.map((holding) => holding.ticker);
-  const navSub = lastPriceUpdate ? `Live · ${lastPriceUpdate}` : "Live";
-  const historyAsOf = weeklyPerformanceSnapshot.latestHistoryDate ? `As of ${fmt.shortDate(weeklyPerformanceSnapshot.latestHistoryDate)}` : "As of weekly history";
-  const stopLossSub = `${stopLossSnapshot.breachedCount} breach · ${stopLossSnapshot.warningCount} warning`;
+  const analytics = risk?.analytics || null;
+  const liveRiskMetrics = liveRiskSnapshot.metrics;
+  const riskFreeRate = asNumber(settings?.riskFreeRate, 0.04);
+  const baseHistoryRows = dailyPerformanceSnapshot.liveDailyHistory?.length
+    ? dailyPerformanceSnapshot.liveDailyHistory
+    : weeklyPerformanceSnapshot.historyRows;
+  const selectedRangeRows = useMemo(() => {
+    const filtered = filterRowsByOverviewRange(baseHistoryRows, range, customRange);
+    return filtered.length ? filtered : baseHistoryRows;
+  }, [baseHistoryRows, range, customRange]);
+  const previousComparableRows = useMemo(
+    () => getPreviousComparableRows(baseHistoryRows, selectedRangeRows),
+    [baseHistoryRows, selectedRangeRows],
+  );
+  const rangeStats = useMemo(
+    () => computeRangePerformanceStats(selectedRangeRows, riskFreeRate),
+    [selectedRangeRows, riskFreeRate],
+  );
+  const previousRangeStats = useMemo(
+    () => previousComparableRows.length ? computeRangePerformanceStats(previousComparableRows, riskFreeRate) : null,
+    [previousComparableRows, riskFreeRate],
+  );
+  const ytdRows = useMemo(
+    () => {
+      const filtered = filterRowsByOverviewRange(baseHistoryRows, "YTD");
+      return filtered.length ? filtered : baseHistoryRows;
+    },
+    [baseHistoryRows],
+  );
+  const ytdStats = useMemo(() => computeRangePerformanceStats(ytdRows, riskFreeRate), [ytdRows, riskFreeRate]);
+  const sinceInceptionStats = useMemo(
+    () => computeRangePerformanceStats(baseHistoryRows, riskFreeRate),
+    [baseHistoryRows, riskFreeRate],
+  );
+  const monthlyRows = useMemo(() => buildMonthlyReturnRows(selectedRangeRows), [selectedRangeRows]);
+  const monthlyHeatmapMatrix = useMemo(() => buildMonthlyHeatmapMatrix(selectedRangeRows), [selectedRangeRows]);
+  const bestMonth = monthlyRows.length
+    ? [...monthlyRows].sort((left, right) => right.portfolioReturn - left.portfolioReturn)[0]
+    : null;
+  const worstMonth = monthlyRows.length
+    ? [...monthlyRows].sort((left, right) => left.portfolioReturn - right.portfolioReturn)[0]
+    : null;
+  const monthHitRate = monthlyRows.length
+    ? monthlyRows.filter((row) => row.portfolioReturn > 0).length / monthlyRows.length
+    : 0;
+  const concentrationMetrics = useMemo(
+    () => buildConcentrationMetrics(liveBookSnapshot.activeStocks, liveBookSnapshot.nav, liveBookSnapshot.cashBalance),
+    [liveBookSnapshot.activeStocks, liveBookSnapshot.nav, liveBookSnapshot.cashBalance],
+  );
+  const rollingSharpeSeries = useMemo(
+    () => buildRollingMetricSeries(
+      selectedRangeRows,
+      Math.min(12, Math.max(selectedRangeRows.length, 3)),
+      (slice) => computeRangePerformanceStats(slice, riskFreeRate).sharpeRatio ?? 0,
+    ),
+    [selectedRangeRows, riskFreeRate],
+  );
+  const rollingInformationRatioSeries = useMemo(
+    () => buildRollingMetricSeries(
+      selectedRangeRows,
+      Math.min(12, Math.max(selectedRangeRows.length, 3)),
+      (slice) => computeRangePerformanceStats(slice, riskFreeRate).informationRatio ?? 0,
+    ),
+    [selectedRangeRows, riskFreeRate],
+  );
+
+  const themeRiskRows = useMemo(
+    () => ((analytics?.themeRisk || []).map((row, index) => ({
+      ...row,
+      fill: getThemeColor(row.theme, index),
+    }))).sort((a, b) => asNumber(b.riskContrib) - asNumber(a.riskContrib)),
+    [analytics],
+  );
+  const themeRiskMap = useMemo(
+    () => new Map(themeRiskRows.map((row) => [row.theme, row])),
+    [themeRiskRows],
+  );
+  const themeValueMap = useMemo(
+    () => new Map(liveBookSnapshot.bookSummary.stockThemeTotals.map((row) => [row.theme, row.totalValue])),
+    [liveBookSnapshot.bookSummary.stockThemeTotals],
+  );
+  const themeAttributionRows = useMemo(
+    () => liveBookSnapshot.bookSummary.stockThemeTotals.map((row, index) => {
+      const themeHoldings = liveBookSnapshot.activeStocks.filter((holding) => holding.theme === row.theme);
+      const themePnl = themeHoldings.reduce((sum, holding) => sum + asNumber(holding.pnlDollar), 0);
+      const benchmarkWeightEstimate = themeHoldings.reduce(
+        (sum, holding) => sum + ((holding.weight || 0) * asNumber(holding.benchmarkWeight)),
+        0,
+      );
+      const riskRow = themeRiskMap.get(row.theme);
+      return {
+        theme: row.theme,
+        holdings: row.holdings,
+        totalValue: row.totalValue,
+        portfolioWeight: liveBookSnapshot.nav > 0 ? row.totalValue / liveBookSnapshot.nav : 0,
+        activeWeight: (liveBookSnapshot.nav > 0 ? row.totalValue / liveBookSnapshot.nav : 0) - benchmarkWeightEstimate,
+        benchmarkWeightEstimate,
+        pnlDollar: themePnl,
+        contributionToReturn: liveBookSnapshot.nav > 0 ? themePnl / liveBookSnapshot.nav : 0,
+        totalReturnPct: row.totalValue > 0 ? themePnl / row.totalValue : 0,
+        riskContrib: riskRow?.riskContrib ?? null,
+        avgBeta: riskRow?.avgBeta ?? null,
+        fill: getThemeColor(row.theme, index),
+      };
+    }).sort((left, right) => right.contributionToReturn - left.contributionToReturn),
+    [liveBookSnapshot.bookSummary.stockThemeTotals, liveBookSnapshot.activeStocks, liveBookSnapshot.nav, themeRiskMap],
+  );
+  const riskContributionRows = selectedTheme
+    ? themeRiskRows.filter((row) => row.theme === selectedTheme)
+    : themeRiskRows.slice(0, 10);
+  const returnAttributionRows = selectedTheme
+    ? themeAttributionRows.filter((row) => row.theme === selectedTheme)
+    : themeAttributionRows.slice(0, 10);
+  const topRiskTheme = riskContributionRows[0] || themeRiskRows[0] || null;
+  const topReturnTheme = returnAttributionRows[0] || themeAttributionRows[0] || null;
+
+  const factorExposureRows = useMemo(() => {
+    if (!liveRiskMetrics) return [];
+    const latestWeek = analytics?.latestWeek || null;
+    return [
+      {
+        factor: "Market",
+        exposure: liveRiskMetrics.portfolioBeta,
+        contribution: latestWeek?.marketContrib ?? null,
+        note: "Beta vs S&P 500",
+        fill: "#1e3a5f",
+      },
+      {
+        factor: "Value",
+        exposure: liveRiskMetrics.valueBeta,
+        contribution: latestWeek?.valueContrib ?? null,
+        note: "Style tilt",
+        fill: "#2563eb",
+      },
+      {
+        factor: "Momentum",
+        exposure: liveRiskMetrics.momentumBeta,
+        contribution: latestWeek?.momentumContrib ?? null,
+        note: "Style tilt",
+        fill: "#7c3aed",
+      },
+      {
+        factor: "Growth",
+        exposure: liveRiskMetrics.growthBeta,
+        contribution: latestWeek?.growthContrib ?? null,
+        note: "Style tilt",
+        fill: "#0ea5e9",
+      },
+      {
+        factor: "Alpha",
+        exposure: liveRiskMetrics.alphaDaily != null ? liveRiskMetrics.alphaDaily * 252 : null,
+        contribution: latestWeek?.alphaContrib ?? null,
+        note: "Annualized model alpha",
+        fill: "#059669",
+      },
+    ].filter((row) => row.exposure != null || row.contribution != null);
+  }, [liveRiskMetrics, analytics]);
+  const dominantFactor = factorExposureRows.length
+    ? [...factorExposureRows]
+      .filter((row) => row.factor !== "Alpha")
+      .sort((left, right) => Math.abs(asNumber(right.contribution)) - Math.abs(asNumber(left.contribution)))[0]
+    : null;
+
+  const positionAttributionRows = useMemo(
+    () => liveBookSnapshot.activeStocks.map((holding) => {
+      const benchmarkWeightEstimate = (holding.weight || 0) * asNumber(holding.benchmarkWeight);
+      const themeRisk = themeRiskMap.get(holding.theme);
+      const themeValue = themeValueMap.get(holding.theme) || 0;
+      const currentPrice = asNumber(holding.currentPrice);
+      const previousClose = activePreviousClosePrice(holding);
+      return {
+        id: holding.id,
+        ticker: holding.ticker,
+        company: holding.company || "—",
+        theme: holding.theme,
+        weight: holding.weight || 0,
+        activeWeight: (holding.weight || 0) - benchmarkWeightEstimate,
+        currentPrice,
+        dailyReturn: previousClose > 0 ? currentPrice / previousClose - 1 : 0,
+        totalReturnPct: holdingCostBasis(holding) > 0 ? asNumber(holding.pnlDollar) / holdingCostBasis(holding) : 0,
+        contributionToReturn: liveBookSnapshot.nav > 0 ? asNumber(holding.pnlDollar) / liveBookSnapshot.nav : 0,
+        riskContribution: themeRisk?.riskContrib != null && themeValue > 0
+          ? themeRisk.riskContrib * (asNumber(holding.positionValue) / themeValue)
+          : null,
+        pnlDollar: asNumber(holding.pnlDollar),
+        positionValue: asNumber(holding.positionValue),
+      };
+    }),
+    [liveBookSnapshot.activeStocks, liveBookSnapshot.nav, themeRiskMap, themeValueMap],
+  );
+  const attributionScopeRows = selectedTheme
+    ? positionAttributionRows.filter((row) => row.theme === selectedTheme)
+    : positionAttributionRows;
+  const topContributors = [...attributionScopeRows]
+    .sort((left, right) => right.contributionToReturn - left.contributionToReturn)
+    .slice(0, 5)
+    .map((row) => ({ ...row, bucket: "Top contributor" }));
+  const topDetractors = [...attributionScopeRows]
+    .sort((left, right) => left.contributionToReturn - right.contributionToReturn)
+    .slice(0, 5)
+    .map((row) => ({ ...row, bucket: "Top detractor" }));
+  const positionAttributionTableRows = [...topContributors, ...topDetractors];
+  const weakestOpenRows = [...attributionScopeRows]
+    .sort((left, right) => left.contributionToReturn - right.contributionToReturn)
+    .slice(0, 3);
+
+  const holdingsOverviewRows = useMemo(() => {
+    let rows = [...positionAttributionRows];
+    if (selectedTheme) rows = rows.filter((row) => row.theme === selectedTheme);
+    if (holdingSearch.trim()) {
+      const needle = holdingSearch.trim().toLowerCase();
+      rows = rows.filter((row) => (
+        row.ticker.toLowerCase().includes(needle)
+        || row.company.toLowerCase().includes(needle)
+        || row.theme.toLowerCase().includes(needle)
+      ));
+    }
+    rows.sort((left, right) => {
+      const leftValue = left[holdingSortKey];
+      const rightValue = right[holdingSortKey];
+      if (typeof leftValue === "string" || typeof rightValue === "string") {
+        return holdingSortDir * String(leftValue || "").localeCompare(String(rightValue || ""));
+      }
+      return holdingSortDir * (asNumber(leftValue) - asNumber(rightValue));
+    });
+    return rows;
+  }, [positionAttributionRows, selectedTheme, holdingSearch, holdingSortKey, holdingSortDir]);
+
+  const selectedRangeLabel = useMemo(() => {
+    if (range === "CUSTOM") {
+      if (customRange.start || customRange.end) {
+        return `${customRange.start ? fmt.shortDate(customRange.start) : "Start"} - ${customRange.end ? fmt.shortDate(customRange.end) : "Latest"}`;
+      }
+      return "Custom range";
+    }
+    return OVERVIEW_RANGE_OPTIONS.find((option) => option.key === range)?.label || "Selected range";
+  }, [range, customRange]);
+  const selectionAsOf = selectedRangeRows.at(-1)?.date ? fmt.shortDate(selectedRangeRows.at(-1)?.date) : "latest history";
+  const navSparkline = baseHistoryRows.map((row) => asNumber(row.portfolioValue)).filter((value) => value > 0);
+  const totalReturnSparkline = rangeStats.cumulativeData.map((row) => row.portfolio);
+  const activeReturnSparkline = rangeStats.cumulativeData.map((row) => row.active);
+  const annualizedVolSparkline = rangeStats.rollingVolSeries.map((row) => row.value);
+  const sharpeSparkline = rollingSharpeSeries.map((row) => row.value);
+  const infoRatioSparkline = rollingInformationRatioSeries.map((row) => row.value);
+  const maxDrawdownSparkline = rangeStats.drawdownSeries.map((row) => row.portfolioDrawdown);
+  const trackingErrorSparkline = rangeStats.rollingTrackingErrorSeries.map((row) => row.value);
+  const top5Weight = concentrationMetrics.top5Weight;
+  const liveVolatility = liveRiskMetrics?.annualizedVol ?? rangeStats.annualizedVolatility;
+  const liveTrackingError = liveRiskSnapshot.trackingError ?? rangeStats.trackingError;
+  const liveBeta = liveRiskSnapshot.beta;
+  const latestWeek = analytics?.latestWeek || null;
+
+  const managerKpiPayload = useMemo(() => ({
+    range_label: selectedRangeLabel,
+    risk_free_rate: riskFreeRate,
+    rows: selectedRangeRows.map((row) => ({
+      date: row.date,
+      portfolio_return: Number(asNumber(row.portfolioReturn).toFixed(8)),
+      benchmark_return: Number(asNumber(row.benchmarkReturn).toFixed(8)),
+    })),
+    active_holdings: liveBookSnapshot.activeStocks.map((holding) => ({
+      ticker: holding.ticker,
+      theme: holding.theme,
+      weight: Number(asNumber(holding.weight).toFixed(8)),
+      benchmark_weight: Number(asNumber(holding.benchmarkWeight).toFixed(8)),
+      position_value: Number(asNumber(holding.positionValue).toFixed(6)),
+      pnl_dollar: Number(asNumber(holding.pnlDollar).toFixed(6)),
+    })),
+  }), [selectedRangeLabel, riskFreeRate, selectedRangeRows, liveBookSnapshot.activeStocks]);
+
+  const selectedRangeDetails = useMemo(() => ({
+    totalReturn: {
+      sectionLabel: "Overview Range",
+      title: "Total Return",
+      displayedValue: fmt.pct(rangeStats.totalReturn),
+      displayedSub: `${selectedRangeLabel} · Benchmark ${fmt.pct(rangeStats.benchmarkReturn)}`,
+      source: "Compounded from the canonical performance history filtered by the selected Overview date range.",
+      formula: [
+        "total_return = Π(1 + portfolio_return_t) - 1",
+        "benchmark_return = Π(1 + benchmark_return_t) - 1",
+        "active_return = total_return - benchmark_return",
+      ],
+      inputs: [
+        `range = ${selectedRangeLabel}`,
+        `observations = ${selectedRangeRows.length}`,
+        `benchmark_return = ${fmt.pct(rangeStats.benchmarkReturn)}`,
+      ],
+      calculation: [
+        `total_return = ${fmt.pct(rangeStats.totalReturn)}`,
+        `active_return = ${fmt.pct(rangeStats.activeReturn)}`,
+      ],
+      notes: [
+        `Last history point = ${selectionAsOf}`,
+      ],
+      pythonFileName: "overview_total_return_check.py",
+      pythonSource: buildPythonScript("Recompute selected-range total and active return from canonical history", managerKpiPayload, [
+        'portfolio_nav = 1.0',
+        'benchmark_nav = 1.0',
+        'for row in data["rows"]:',
+        '    portfolio_nav *= 1 + row["portfolio_return"]',
+        '    benchmark_nav *= 1 + row["benchmark_return"]',
+        'total_return = portfolio_nav - 1',
+        'benchmark_return = benchmark_nav - 1',
+        'active_return = total_return - benchmark_return',
+        'print({"total_return": round(total_return, 6), "benchmark_return": round(benchmark_return, 6), "active_return": round(active_return, 6)})',
+      ]),
+    },
+    activeReturn: {
+      sectionLabel: "Overview Range",
+      title: "Active Return",
+      displayedValue: fmt.pct(rangeStats.activeReturn),
+      displayedSub: `${selectedRangeLabel} vs benchmark`,
+      source: "Calculated as compounded portfolio return minus compounded benchmark return over the selected range.",
+      formula: [
+        "active_return = total_return - benchmark_return",
+      ],
+      inputs: [
+        `portfolio_return = ${fmt.pct(rangeStats.totalReturn)}`,
+        `benchmark_return = ${fmt.pct(rangeStats.benchmarkReturn)}`,
+      ],
+      calculation: [
+        `active_return = ${fmt.pct(rangeStats.totalReturn)} - ${fmt.pct(rangeStats.benchmarkReturn)} = ${fmt.pct(rangeStats.activeReturn)}`,
+      ],
+      notes: [
+        `Information ratio = ${rangeStats.informationRatio == null ? "—" : fmt.num(rangeStats.informationRatio, 2)}`,
+      ],
+      pythonFileName: "overview_active_return_check.py",
+      pythonSource: buildPythonScript("Recompute selected-range active return from total and benchmark return", managerKpiPayload, [
+        'portfolio_nav = 1.0',
+        'benchmark_nav = 1.0',
+        'for row in data["rows"]:',
+        '    portfolio_nav *= 1 + row["portfolio_return"]',
+        '    benchmark_nav *= 1 + row["benchmark_return"]',
+        'active_return = (portfolio_nav - 1) - (benchmark_nav - 1)',
+        'print({"active_return": round(active_return, 6)})',
+      ]),
+    },
+    maxDrawdown: {
+      sectionLabel: "Overview Range",
+      title: "Max Drawdown",
+      displayedValue: fmt.pct(rangeStats.maxDrawdown),
+      displayedSub: `${selectedRangeLabel} peak-to-trough`,
+      source: "Calculated from the selected performance path by measuring the worst drop from any prior peak.",
+      formula: [
+        "nav_t = Π(1 + portfolio_return_t)",
+        "drawdown_t = nav_t / max(nav_0..nav_t) - 1",
+        "max_drawdown = min(drawdown_t)",
+      ],
+      inputs: [
+        `range = ${selectedRangeLabel}`,
+        `observations = ${selectedRangeRows.length}`,
+      ],
+      calculation: [
+        `max_drawdown = ${fmt.pct(rangeStats.maxDrawdown)}`,
+      ],
+      notes: [
+        `Current drawdown = ${fmt.pct(rangeStats.drawdownSeries.at(-1)?.portfolioDrawdown || 0)}`,
+      ],
+      pythonFileName: "overview_max_drawdown_check.py",
+      pythonSource: buildPythonScript("Recompute selected-range max drawdown from canonical history", managerKpiPayload, [
+        'nav = 1.0',
+        'peak = 1.0',
+        'worst = 0.0',
+        'for row in data["rows"]:',
+        '    nav *= 1 + row["portfolio_return"]',
+        '    peak = max(peak, nav)',
+        '    drawdown = nav / peak - 1',
+        '    worst = min(worst, drawdown)',
+        'print({"max_drawdown": round(worst, 6)})',
+      ]),
+    },
+    top5Concentration: {
+      sectionLabel: "Live Book",
+      title: "Top 5 Holdings Concentration",
+      displayedValue: fmt.pct(top5Weight, 1),
+      displayedSub: `${concentrationMetrics.activeCount} active stocks`,
+      source: "Calculated from live position weights in the current active stock book.",
+      formula: [
+        "top5_concentration = Σ(weight_i for 5 largest active stock positions)",
+      ],
+      inputs: [
+        `active_stock_count = ${concentrationMetrics.activeCount}`,
+        `largest_position = ${concentrationMetrics.largestHolding?.ticker || "—"} ${concentrationMetrics.largestHolding ? fmt.pct(concentrationMetrics.largestHolding.weight, 1) : "—"}`,
+      ],
+      calculation: [
+        `top5_concentration = ${fmt.pct(top5Weight, 1)}`,
+      ],
+      notes: [
+        `Top 10 concentration = ${fmt.pct(concentrationMetrics.top10Weight, 1)}`,
+        `HHI = ${fmt.num(concentrationMetrics.hhi, 4)}`,
+      ],
+      pythonFileName: "overview_top5_concentration_check.py",
+      pythonSource: buildPythonScript("Recompute top 5 holdings concentration from live active weights", managerKpiPayload, [
+        'weights = sorted([row["weight"] for row in data["active_holdings"]], reverse=True)',
+        'top5_concentration = sum(weights[:5])',
+        'print({"top5_concentration": round(top5_concentration, 6)})',
+      ]),
+    },
+  }), [rangeStats, selectedRangeLabel, selectedRangeRows.length, selectionAsOf, top5Weight, concentrationMetrics, managerKpiPayload]);
+
+  const performanceSummary = {
+    ytdReturn: ytdStats.totalReturn,
+    sinceInceptionReturn: sinceInceptionStats.totalReturn,
+    bestMonth,
+    worstMonth,
+    hitRate: monthHitRate,
+    upCapture: rangeStats.upCapture,
+    downCapture: rangeStats.downCapture,
+    currentDrawdown: rangeStats.drawdownSeries.at(-1)?.portfolioDrawdown || 0,
+  };
+  const capitalStackRows = [
+    {
+      label: "Stocks",
+      value: liveBookSnapshot.stockValue,
+      share: liveBookSnapshot.nav > 0 ? liveBookSnapshot.stockValue / liveBookSnapshot.nav : 0,
+      fill: "#2563eb",
+      accent: "text-blue-700",
+      bg: "bg-blue-50",
+    },
+    {
+      label: "S&P 500",
+      value: liveBookSnapshot.benchmarkValue,
+      share: liveBookSnapshot.nav > 0 ? liveBookSnapshot.benchmarkValue / liveBookSnapshot.nav : 0,
+      fill: "#0f172a",
+      accent: "text-slate-800",
+      bg: "bg-slate-100",
+    },
+    {
+      label: "Cash",
+      value: liveBookSnapshot.cashBalance,
+      share: liveBookSnapshot.nav > 0 ? liveBookSnapshot.cashBalance / liveBookSnapshot.nav : 0,
+      fill: "#94a3b8",
+      accent: "text-slate-600",
+      bg: "bg-slate-50",
+    },
+  ].filter((row) => row.value > 0 || row.label === "Cash");
+
+  const pmInsights = [
+    topReturnTheme
+      ? `${topReturnTheme.theme} is the largest current return sleeve, contributing ${fmt.pct(topReturnTheme.contributionToReturn, 2)} of NAV return with ${fmt.pct(topReturnTheme.portfolioWeight, 1)} capital weight.`
+      : null,
+    topRiskTheme
+      ? `${topRiskTheme.theme} is the largest live risk sleeve at ${fmt.pct(topRiskTheme.riskContrib, 1)} of modeled theme risk, so return leadership and risk leadership are${topReturnTheme?.theme === topRiskTheme.theme ? "" : " not"} coming from the same place.`
+      : null,
+    `${selectedRangeLabel} active return is ${fmt.pct(rangeStats.activeReturn)} with information ratio ${rangeStats.informationRatio == null ? "—" : fmt.num(rangeStats.informationRatio, 2)} and tracking error ${fmt.pct(liveTrackingError)}.`,
+    `${fmt.pct(top5Weight, 1)} of NAV sits in the top 5 names and ${fmt.pct(concentrationMetrics.cashWeight, 1)} remains in cash.`,
+    stopLossSnapshot.alertCount > 0
+      ? `${stopLossSnapshot.alertCount} names are on stop-loss watch, including ${stopLossSnapshot.topAlerts.slice(0, 2).map((row) => row.ticker).join(" and ")}.`
+      : "No names are currently inside the stop-loss breach or warning buffer.",
+  ].filter(Boolean).slice(0, 5);
+
+  const exportCsv = useCallback(() => {
+    const rows = [
+      ["Section", "Metric", "Value", "Context"],
+      ["Overview KPI", "Portfolio NAV", fmt.usdExact(liveBookSnapshot.nav), lastPriceUpdate || "Live"],
+      ["Overview KPI", "Total Return", fmt.pct(rangeStats.totalReturn), selectedRangeLabel],
+      ["Overview KPI", "Active Return", fmt.pct(rangeStats.activeReturn), selectedRangeLabel],
+      ["Overview KPI", "Annualized Volatility", fmt.pct(liveVolatility), liveRiskMetrics ? "Live risk model" : selectedRangeLabel],
+      ["Overview KPI", "Sharpe Ratio", rangeStats.sharpeRatio == null ? "—" : fmt.num(rangeStats.sharpeRatio, 2), selectedRangeLabel],
+      ["Overview KPI", "Information Ratio", rangeStats.informationRatio == null ? "—" : fmt.num(rangeStats.informationRatio, 2), selectedRangeLabel],
+      ["Overview KPI", "Max Drawdown", fmt.pct(rangeStats.maxDrawdown), selectedRangeLabel],
+      ["Overview KPI", "Tracking Error", fmt.pct(liveTrackingError), liveRiskSnapshot.trackingErrorStatus],
+      ["Overview KPI", "Beta", liveBeta == null ? "—" : fmt.num(liveBeta, 2), liveRiskSnapshot.betaStatus],
+      ["Overview KPI", "Top 5 Concentration", fmt.pct(top5Weight, 1), "Live book"],
+      [""],
+      ["Holding", "Ticker", "Theme", "Weight", "Active Weight", "Price", "Daily %", "Total Return %", "Contribution to Return", "Contribution to Risk", "P/L", "Market Value"],
+      ...holdingsOverviewRows.map((row) => [
+        "",
+        row.ticker,
+        row.theme,
+        fmt.pct(row.weight, 4),
+        fmt.pct(row.activeWeight, 4),
+        fmt.usdExact(row.currentPrice),
+        fmt.pct(row.dailyReturn, 4),
+        fmt.pct(row.totalReturnPct, 4),
+        fmt.pct(row.contributionToReturn, 6),
+        row.riskContribution == null ? "—" : fmt.pct(row.riskContribution, 6),
+        fmt.usdExact(row.pnlDollar),
+        fmt.usdExact(row.positionValue),
+      ]),
+    ];
+    downloadFile(`overview_export_${currentLocalDateIso()}.csv`, toCsv(rows), "text/csv;charset=utf-8");
+  }, [liveBookSnapshot.nav, lastPriceUpdate, rangeStats, selectedRangeLabel, liveVolatility, liveRiskMetrics, liveTrackingError, liveRiskSnapshot, liveBeta, top5Weight, holdingsOverviewRows]);
+
+  const handleHoldingSort = (key) => {
+    if (holdingSortKey === key) {
+      setHoldingSortDir((direction) => direction * -1);
+      return;
+    }
+    setHoldingSortKey(key);
+    setHoldingSortDir(["ticker", "company", "theme"].includes(key) ? 1 : -1);
+  };
 
   return <div className="space-y-6">
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-      <StatCard label="Portfolio NAV" value={fmt.usdExact(liveBookSnapshot.nav)} sub={navSub} icon={DollarSign} detail={overviewDetails.portfolioNav} />
-      <StatCard
-        label="Day P&L"
-        value={fmt.usdExact(liveBookSnapshot.dayPnl)}
-        sub={`${fmt.pct(liveBookSnapshot.dayReturn)} · Live`}
-        trend={liveBookSnapshot.dayPnl == null ? undefined : (liveBookSnapshot.dayPnl >= 0 ? "up" : "down")}
-        color={liveBookSnapshot.dayPnl == null ? "text-slate-700" : (liveBookSnapshot.dayPnl >= 0 ? "text-emerald-700" : "text-red-600")}
-        icon={ArrowRightLeft}
-        detail={overviewDetails.dayPnl}
-      />
-      <StatCard
-        label="Since-Inception Return"
-        value={fmt.pct(weeklyPerformanceSnapshot.cumulativePortfolio)}
-        sub={historyAsOf}
-        trend={weeklyPerformanceSnapshot.cumulativePortfolio >= 0 ? "up" : "down"}
-        color={weeklyPerformanceSnapshot.cumulativePortfolio >= 0 ? "text-emerald-700" : "text-red-600"}
-        icon={BarChart3}
-        detail={overviewDetails.sinceInceptionReturn}
-      />
-      <StatCard
-        label="Excess Return"
-        value={fmt.pct(weeklyPerformanceSnapshot.excessReturn)}
-        sub={historyAsOf}
-        trend={weeklyPerformanceSnapshot.excessReturn >= 0 ? "up" : "down"}
-        color={weeklyPerformanceSnapshot.excessReturn >= 0 ? "text-emerald-700" : "text-red-600"}
-        icon={TrendingUp}
-        detail={overviewDetails.excessReturn}
-      />
-      <StatCard
-        label="Current Drawdown"
-        value={fmt.pct(weeklyPerformanceSnapshot.currentDrawdown)}
-        sub={`Max DD ${fmt.pct(weeklyPerformanceSnapshot.maxDrawdown)}`}
-        trend={weeklyPerformanceSnapshot.currentDrawdown >= 0 ? "up" : "down"}
-        color={weeklyPerformanceSnapshot.currentDrawdown >= 0 ? "text-emerald-700" : "text-red-600"}
-        icon={AlertTriangle}
-        detail={overviewDetails.currentDrawdown}
-      />
-      <StatCard
-        label="Portfolio Beta"
-        value={liveRiskSnapshot.beta == null ? "—" : fmt.num(liveRiskSnapshot.beta)}
-        sub={liveRiskSnapshot.betaStatus}
-        icon={Shield}
-        detail={overviewDetails.portfolioBeta}
-      />
-      <StatCard
-        label="Tracking Error"
-        value={liveRiskSnapshot.trackingError == null ? "—" : fmt.pct(liveRiskSnapshot.trackingError)}
-        sub={liveRiskSnapshot.trackingErrorStatus}
-        icon={Activity}
-        detail={overviewDetails.trackingError}
-      />
-      <StatCard
-        label="Stop-Loss Alerts"
-        value={stopLossSnapshot.alertCount}
-        sub={stopLossSub}
-        color={stopLossSnapshot.breachedCount > 0 ? "text-red-600" : stopLossSnapshot.warningCount > 0 ? "text-amber-600" : "text-emerald-700"}
-        icon={AlertCircle}
-        detail={overviewDetails.stopLossAlerts}
-      />
-    </div>
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Portfolio Allocation</h3>
-        <div className="flex items-center gap-4">
-          <ResponsiveContainer width="55%" height={260}><PieChart><Pie data={liveBookSnapshot.bookSummary.portfolioAllocation} cx="50%" cy="50%" innerRadius={50} outerRadius={95} paddingAngle={2} dataKey="value" labelLine={false}>{liveBookSnapshot.bookSummary.portfolioAllocation.map((e,i)=><Cell key={i} fill={e.fill} stroke="#fff" strokeWidth={2}/>)}</Pie><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/></PieChart></ResponsiveContainer>
-          <div className="w-[45%] space-y-1.5 max-h-[260px] overflow-y-auto pr-1">{allocationLegend.map((t,i)=><div key={i} className="flex items-center gap-2"><span className="w-3 h-3 rounded-sm flex-shrink-0" style={{backgroundColor:t.fill}}/><span className="text-xs text-slate-700 flex-1 truncate">{t.name}</span><span className="text-xs font-semibold text-slate-800 tabular-nums">{fmt.pct(t.value,1)}</span></div>)}</div>
-        </div></Card>
-      <NewsFeed tickers={tickers}/>
-      <Card className="p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-slate-700">Historical Performance</h3>
-          <div className="flex items-center gap-2">
-            <TabButton active={returnView==="weekly"} onClick={()=>setReturnView("weekly")}>Weekly</TabButton>
-            <TabButton active={returnView==="daily"} onClick={()=>setReturnView("daily")}>Daily (20D)</TabButton>
-          </div>
+    <OverviewHeaderBar
+      range={range}
+      setRange={setRange}
+      customRange={customRange}
+      setCustomRange={setCustomRange}
+      relativeView={relativeView}
+      setRelativeView={setRelativeView}
+      benchmark={benchmark}
+      setBenchmark={setBenchmark}
+      lastPriceUpdate={lastPriceUpdate}
+      onExportCsv={exportCsv}
+      onExportPdf={() => window.print()}
+      benchmarkOptions={BENCHMARK_OPTIONS}
+    />
+
+    <Card className="p-5">
+      <div className="mb-4 flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Top KPI Strip</p>
+          <h3 className="mt-1 text-xl font-bold text-slate-900">Institutional summary, benchmark-relative by default</h3>
+          <p className="mt-1 text-sm text-slate-500">The first row shows what happened, how much risk it required, and how concentrated the current book is.</p>
         </div>
-        <ResponsiveContainer width="100%" height={260}><ComposedChart data={chartPerformanceSnapshot.cumulativeData}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tickFormatter={v=>fmt.pct(v,1)} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.pct(v)}/>}/><Legend/><Area type="monotone" dataKey="portfolio" fill="#1e3a5f" fillOpacity={0.08} stroke="#1e3a5f" strokeWidth={2} name="Portfolio"/><Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} name="S&P 500" strokeDasharray="5 5"/></ComposedChart></ResponsiveContainer>
-      </Card>
-      <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">Open P&L Drivers (Top/Bottom 5)</h3>
-        <ResponsiveContainer width="100%" height={260}><BarChart data={pnlChart}><CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/><XAxis dataKey="ticker" tick={{fontSize:9}}/><YAxis tickFormatter={v=>`$${(v/1000).toFixed(0)}k`} tick={{fontSize:11}}/><Tooltip content={<CustomTooltip formatter={v=>fmt.usd(v)}/>}/><Bar dataKey="pnlDollar" name="PnL $" radius={[4,4,0,0]}>{pnlChart.map((e,i)=><Cell key={i} fill={e.pnlDollar>=0?"#059669":"#dc2626"}/>)}</Bar></BarChart></ResponsiveContainer></Card>
-    </div>
-    {liveBookSnapshot.exited.length > 0 && <Card className="p-4"><h3 className="text-sm font-semibold text-slate-700 mb-3">P&L Decomposition ({liveBookSnapshot.exited.length} exits = {fmt.usd(liveBookSnapshot.totalRealizedPnl)})</h3>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Open P&L</p>
-          <p className={`mt-1 text-lg font-bold ${liveBookSnapshot.totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usdExact(liveBookSnapshot.totalUnrealizedPnl)}</p>
-          <p className="text-xs text-slate-500">{fmt.pct(liveBookSnapshot.nav > 0 ? liveBookSnapshot.totalUnrealizedPnl / liveBookSnapshot.nav : 0)} of live NAV</p>
-        </div>
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Realized P&L</p>
-          <p className={`mt-1 text-lg font-bold ${liveBookSnapshot.totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usdExact(liveBookSnapshot.totalRealizedPnl)}</p>
-          <p className="text-xs text-slate-500">{fmt.pct(liveBookSnapshot.nav > 0 ? liveBookSnapshot.totalRealizedPnl / liveBookSnapshot.nav : 0)} of live NAV</p>
-        </div>
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Current Total P&L</p>
-          <p className={`mt-1 text-lg font-bold ${liveBookSnapshot.totalPnl >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usdExact(liveBookSnapshot.totalPnl)}</p>
-          <p className="text-xs text-slate-500">{fmt.pct(liveBookSnapshot.nav > 0 ? liveBookSnapshot.totalPnl / liveBookSnapshot.nav : 0)} of live NAV</p>
+        <div className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-600">
+          {selectedRangeLabel} · as of {selectionAsOf}
         </div>
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-        <div className="bg-emerald-50 rounded-lg p-3 text-center"><p className="text-xs text-emerald-600">Winners</p><p className="text-lg font-bold text-emerald-700">{liveBookSnapshot.exited.filter(h=>h.pnlDollar>0).length}</p></div>
-        <div className="bg-red-50 rounded-lg p-3 text-center"><p className="text-xs text-red-600">Losers</p><p className="text-lg font-bold text-red-700">{liveBookSnapshot.exited.filter(h=>h.pnlDollar<0).length}</p></div>
-        <div className="bg-emerald-50 rounded-lg p-3 text-center"><p className="text-xs text-emerald-600">Gains</p><p className="text-lg font-bold text-emerald-700">{fmt.usd(liveBookSnapshot.exited.filter(h=>h.pnlDollar>0).reduce((s,h)=>s+h.pnlDollar,0))}</p></div>
-        <div className="bg-red-50 rounded-lg p-3 text-center"><p className="text-xs text-red-600">Losses</p><p className="text-lg font-bold text-red-700">{fmt.usd(liveBookSnapshot.exited.filter(h=>h.pnlDollar<0).reduce((s,h)=>s+h.pnlDollar,0))}</p></div>
-      </div></Card>}
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-5">
+        <StatCard
+          label="Portfolio Value / NAV"
+          value={fmt.usdExact(liveBookSnapshot.nav)}
+          sub={`Stocks ${fmt.usd(liveBookSnapshot.stockValue)} · Benchmark ${fmt.usd(liveBookSnapshot.benchmarkValue)}`}
+          delta={liveBookSnapshot.dayPnl == null ? null : `${liveBookSnapshot.dayPnl >= 0 ? "+" : ""}${fmt.usdExact(liveBookSnapshot.dayPnl)} day move`}
+          sparklineData={navSparkline}
+          icon={DollarSign}
+          detail={overviewDetails.portfolioNav}
+          footerLabel={lastPriceUpdate ? "Live" : ""}
+        />
+        <StatCard
+          label="Total Return"
+          value={fmt.pct(rangeStats.totalReturn)}
+          sub={`Benchmark ${fmt.pct(rangeStats.benchmarkReturn)}`}
+          trend={rangeStats.totalReturn >= 0 ? "up" : "down"}
+          color={rangeStats.totalReturn >= 0 ? "text-emerald-700" : "text-red-600"}
+          delta={previousRangeStats ? formatComparableDelta(rangeStats.totalReturn, previousRangeStats.totalReturn, (value) => fmt.pct(value, 1)) : null}
+          sparklineData={totalReturnSparkline}
+          icon={TrendingUp}
+          detail={selectedRangeDetails.totalReturn}
+          footerLabel={selectedRangeLabel}
+        />
+        <StatCard
+          label="Active Return vs Benchmark"
+          value={fmt.pct(rangeStats.activeReturn)}
+          sub={`Alpha ${rangeStats.alpha == null ? "—" : fmt.pct(rangeStats.alpha, 1)}`}
+          trend={rangeStats.activeReturn >= 0 ? "up" : "down"}
+          color={rangeStats.activeReturn >= 0 ? "text-emerald-700" : "text-red-600"}
+          delta={previousRangeStats ? formatComparableDelta(rangeStats.activeReturn, previousRangeStats.activeReturn, (value) => fmt.pct(value, 1)) : null}
+          sparklineData={activeReturnSparkline}
+          sparklineColor="#059669"
+          icon={ArrowRightLeft}
+          detail={selectedRangeDetails.activeReturn}
+          footerLabel={selectedRangeLabel}
+        />
+        <StatCard
+          label="Annualized Volatility"
+          value={fmt.pct(liveVolatility)}
+          sub={`Downside ${fmt.pct(rangeStats.downsideDeviation)}`}
+          sparklineData={annualizedVolSparkline}
+          icon={Activity}
+          tooltip={"Annualized volatility measures the standard deviation of portfolio returns scaled by sqrt(252). Lower is better only if return is held constant. This card uses the live risk model when available and falls back to the selected history range otherwise."}
+          footerLabel={liveRiskMetrics ? "Live risk" : selectedRangeLabel}
+        />
+        <StatCard
+          label="Sharpe Ratio"
+          value={rangeStats.sharpeRatio == null ? "—" : fmt.num(rangeStats.sharpeRatio, 2)}
+          sub="Excess return per unit of vol"
+          trend={rangeStats.sharpeRatio == null ? undefined : (rangeStats.sharpeRatio >= 0 ? "up" : "down")}
+          color={rangeStats.sharpeRatio == null ? "text-slate-800" : (rangeStats.sharpeRatio >= 0 ? "text-emerald-700" : "text-red-600")}
+          delta={previousRangeStats && previousRangeStats.sharpeRatio != null ? formatComparableDelta(rangeStats.sharpeRatio ?? 0, previousRangeStats.sharpeRatio, (value) => fmt.num(value, 2)) : null}
+          sparklineData={sharpeSparkline}
+          icon={BarChart3}
+          tooltip={"Sharpe ratio = (annualized return - risk free rate) / annualized volatility. It answers how efficiently the fund converted risk into absolute return over the selected range."}
+          footerLabel={selectedRangeLabel}
+        />
+        <StatCard
+          label="Information Ratio"
+          value={rangeStats.informationRatio == null ? "—" : fmt.num(rangeStats.informationRatio, 2)}
+          sub="Active return per unit of TE"
+          trend={rangeStats.informationRatio == null ? undefined : (rangeStats.informationRatio >= 0 ? "up" : "down")}
+          color={rangeStats.informationRatio == null ? "text-slate-800" : (rangeStats.informationRatio >= 0 ? "text-emerald-700" : "text-red-600")}
+          delta={previousRangeStats && previousRangeStats.informationRatio != null ? formatComparableDelta(rangeStats.informationRatio ?? 0, previousRangeStats.informationRatio, (value) => fmt.num(value, 2)) : null}
+          sparklineData={infoRatioSparkline}
+          icon={BarChart3}
+          tooltip={"Information ratio = annualized active return / tracking error. It shows whether benchmark-relative outperformance is coming from repeatable skill or from taking more active risk."}
+          footerLabel={selectedRangeLabel}
+        />
+        <StatCard
+          label="Max Drawdown"
+          value={fmt.pct(rangeStats.maxDrawdown)}
+          sub={`Current ${fmt.pct(rangeStats.drawdownSeries.at(-1)?.portfolioDrawdown || 0)}`}
+          trend={rangeStats.maxDrawdown >= 0 ? "up" : "down"}
+          color={rangeStats.maxDrawdown >= 0 ? "text-emerald-700" : "text-red-600"}
+          delta={previousRangeStats ? formatComparableDelta(rangeStats.maxDrawdown, previousRangeStats.maxDrawdown, (value) => fmt.pct(value, 1)) : null}
+          sparklineData={maxDrawdownSparkline}
+          sparklineColor="#dc2626"
+          icon={AlertTriangle}
+          detail={selectedRangeDetails.maxDrawdown}
+          footerLabel={selectedRangeLabel}
+        />
+        <StatCard
+          label="Tracking Error"
+          value={fmt.pct(liveTrackingError)}
+          sub={liveRiskSnapshot.trackingErrorStatus}
+          sparklineData={trackingErrorSparkline}
+          icon={Activity}
+          detail={liveRiskSnapshot.details?.trackingError || overviewDetails.trackingError}
+          footerLabel="Live risk"
+        />
+        <StatCard
+          label="Beta vs Benchmark"
+          value={liveBeta == null ? "—" : fmt.num(liveBeta)}
+          sub={liveRiskSnapshot.betaStatus}
+          icon={Shield}
+          detail={liveRiskSnapshot.details?.portfolioBeta || overviewDetails.portfolioBeta}
+          footerLabel="Live risk"
+        />
+        <StatCard
+          label="Top 5 Holdings Concentration"
+          value={fmt.pct(top5Weight, 1)}
+          sub={`${concentrationMetrics.largestHolding?.ticker || "—"} is largest at ${concentrationMetrics.largestHolding ? fmt.pct(concentrationMetrics.largestHolding.weight, 1) : "—"}`}
+          color={top5Weight > 0.4 ? "text-amber-700" : "text-slate-800"}
+          icon={Briefcase}
+          detail={selectedRangeDetails.top5Concentration}
+          footerLabel="Live book"
+        />
+      </div>
+    </Card>
+
+    <div className="grid gap-4 xl:grid-cols-[1.5fr_0.95fr]">
+      <div className="space-y-4">
+        <Card className="p-5">
+          <SectionHeader
+            title="Performance Hero"
+            subtitle={relativeView ? "Portfolio and benchmark path with active spread emphasis." : "Cumulative fund return against the benchmark with active spread overlaid."}
+          >
+            <div className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-600">
+              {benchmark === "SP500" ? "S&P 500 benchmark" : benchmark}
+            </div>
+          </SectionHeader>
+          <ResponsiveContainer width="100%" height={340}>
+            <ComposedChart data={rangeStats.cumulativeData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="label" tick={{ fontSize: 11 }} minTickGap={24} />
+              <YAxis tickFormatter={(value) => fmt.pct(value, 1)} tick={{ fontSize: 11 }} />
+              <Tooltip content={<CustomTooltip formatter={(value) => fmt.pct(value)} />} />
+              <Legend />
+              <Area
+                type="monotone"
+                dataKey="active"
+                fill={relativeView ? "#059669" : "#cbd5e1"}
+                stroke={relativeView ? "#059669" : "#cbd5e1"}
+                fillOpacity={relativeView ? 0.18 : 0.12}
+                name="Active Spread"
+              />
+              <Line type="monotone" dataKey="portfolio" stroke="#1e3a5f" strokeWidth={2.5} name="Portfolio" dot={false} />
+              <Line type="monotone" dataKey="benchmark" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" name="Benchmark" dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+          <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Day P&amp;L</p>
+              <p className={`mt-1 text-lg font-bold ${asNumber(liveBookSnapshot.dayPnl) >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usdExact(liveBookSnapshot.dayPnl)}</p>
+              <p className="text-xs text-slate-500">{fmt.pct(liveBookSnapshot.dayReturn)} today</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Benchmark Return</p>
+              <p className={`mt-1 text-lg font-bold ${rangeStats.benchmarkReturn >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(rangeStats.benchmarkReturn)}</p>
+              <p className="text-xs text-slate-500">{selectedRangeLabel}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Current Drawdown</p>
+              <p className={`mt-1 text-lg font-bold ${(rangeStats.drawdownSeries.at(-1)?.portfolioDrawdown || 0) >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.pct(rangeStats.drawdownSeries.at(-1)?.portfolioDrawdown || 0)}</p>
+              <p className="text-xs text-slate-500">vs peak over {selectedRangeLabel}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Live Stop-Loss Alerts</p>
+              <p className={`mt-1 text-lg font-bold ${stopLossSnapshot.alertCount > 0 ? "text-amber-700" : "text-emerald-700"}`}>{stopLossSnapshot.alertCount}</p>
+              <p className="text-xs text-slate-500">{stopLossSnapshot.breachedCount} breach · {stopLossSnapshot.warningCount} warning</p>
+            </div>
+          </div>
+        </Card>
+        <MonthlyReturnHeatmap matrix={monthlyHeatmapMatrix} relativeView={relativeView} />
+      </div>
+
+      <div className="space-y-4">
+        <PMInsightsPanel insights={pmInsights} />
+        <PerformanceSummaryCard summary={performanceSummary} />
+        <Card className="p-4">
+          <h4 className="text-sm font-semibold text-slate-700">Current Book Snapshot</h4>
+          <p className="mt-1 text-xs text-slate-500">Live capital stack, benchmark share, and immediate watch items.</p>
+          <div className="mt-4 flex h-3 overflow-hidden rounded-full bg-slate-100">
+            {capitalStackRows.map((row) => (
+              <div
+                key={row.label}
+                style={{ width: `${Math.max(row.share * 100, row.share > 0 ? 2 : 0)}%`, backgroundColor: row.fill }}
+              />
+            ))}
+          </div>
+          <div className="mt-4 space-y-3">
+            {capitalStackRows.map((row) => (
+              <div key={row.label} className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.fill }} />
+                  <span className="text-sm font-medium text-slate-700">{row.label}</span>
+                </div>
+                <div className="text-right">
+                  <p className="text-sm font-semibold text-slate-800">{fmt.usdExact(row.value)}</p>
+                  <p className="text-xs text-slate-500">{fmt.pct(row.share, 1)} of NAV</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Open P&amp;L</p>
+              <p className={`mt-1 text-lg font-bold ${liveBookSnapshot.totalUnrealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usd(liveBookSnapshot.totalUnrealizedPnl)}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Realized P&amp;L</p>
+              <p className={`mt-1 text-lg font-bold ${liveBookSnapshot.totalRealizedPnl >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmt.usd(liveBookSnapshot.totalRealizedPnl)}</p>
+            </div>
+          </div>
+          {weakestOpenRows.length > 0 && <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Weakest Live Contributors</p>
+            <div className="mt-3 space-y-2">
+              {weakestOpenRows.map((row) => (
+                <div key={row.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 border border-slate-200">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-slate-800">{row.ticker}</span>
+                      <ThemeBadge theme={row.theme} />
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">{fmt.pct(row.weight, 1)} weight · {fmt.usd(row.positionValue)} market value</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-semibold text-red-500">{fmt.pct(row.contributionToReturn, 2)}</p>
+                    <p className="text-xs text-slate-500">{fmt.usd(row.pnlDollar)}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>}
+        </Card>
+      </div>
+    </div>
+
+    <Card className="p-5">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between mb-5">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Attribution Section</p>
+          <h3 className="mt-1 text-xl font-bold text-slate-900">What is driving return and where the risk sits</h3>
+          <p className="mt-1 text-sm text-slate-500">Theme, position, and factor views are linked so the book can be interrogated from multiple angles without leaving Overview.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {selectedTheme && <button onClick={() => setSelectedTheme(null)} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">Clear theme filter</button>}
+          {selectedTheme && <ThemeBadge theme={selectedTheme} />}
+        </div>
+      </div>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Card className="p-4 border-slate-200 shadow-none">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-700">Return Attribution by Theme</h4>
+              <p className="text-xs text-slate-500">Open P&amp;L contribution to NAV return, sorted highest to lowest.</p>
+            </div>
+            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-600">Click a bar to filter</span>
+          </div>
+          {returnAttributionRows.length > 0 ? <ResponsiveContainer width="100%" height={320}>
+            <BarChart layout="vertical" data={returnAttributionRows} margin={{ left: 12, right: 12 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis type="number" tickFormatter={(value) => fmt.pct(value, 1)} tick={{ fontSize: 11 }} />
+              <YAxis type="category" dataKey="theme" width={92} tick={{ fontSize: 11 }} />
+              <Tooltip content={<CustomTooltip formatter={(value) => fmt.pct(value)} />} />
+              <Bar dataKey="contributionToReturn" name="Contribution" radius={[0, 4, 4, 0]} onClick={(data) => setSelectedTheme(data?.theme || null)}>
+                {returnAttributionRows.map((row) => <Cell key={row.theme} fill={row.fill} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer> : <p className="py-10 text-sm text-slate-500">Theme attribution becomes visible after the live book finishes loading.</p>}
+        </Card>
+
+        <Card className="p-4 border-slate-200 shadow-none">
+          <div className="mb-3">
+            <h4 className="text-sm font-semibold text-slate-700">Return Attribution by Position</h4>
+            <p className="text-xs text-slate-500">Top 5 contributors and bottom 5 detractors by contribution to current NAV return.</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[46rem] text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50">
+                  {["Bucket", "Ticker", "Company", "Theme", "Weight", "Contribution", "Price Return", "Active Wt"].map((heading) => (
+                    <th key={heading} className="px-2 py-2 text-left font-semibold uppercase tracking-wider text-slate-500">{heading}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {positionAttributionTableRows.map((row) => (
+                  <tr key={`${row.bucket}-${row.id}`} className="border-b border-slate-100 hover:bg-slate-50">
+                    <td className="px-2 py-2 text-slate-500">{row.bucket}</td>
+                    <td className="px-2 py-2 font-semibold text-slate-800">{row.ticker}</td>
+                    <td className="px-2 py-2 text-slate-600">{row.company}</td>
+                    <td className="px-2 py-2"><button type="button" onClick={() => setSelectedTheme(row.theme)}><ThemeBadge theme={row.theme} /></button></td>
+                    <td className="px-2 py-2 text-slate-600">{fmt.pct(row.weight, 1)}</td>
+                    <td className={`px-2 py-2 font-medium ${row.contributionToReturn >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.contributionToReturn, 2)}</td>
+                    <td className={`px-2 py-2 font-medium ${row.totalReturnPct >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.totalReturnPct, 1)}</td>
+                    <td className={`px-2 py-2 font-medium ${row.activeWeight >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.activeWeight, 1)}</td>
+                  </tr>
+                ))}
+                {!positionAttributionTableRows.length && <tr><td colSpan={8} className="px-2 py-8 text-center text-sm text-slate-500">No holdings are available for the current theme filter.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        <Card className="p-4 border-slate-200 shadow-none">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-700">Risk Contribution by Theme</h4>
+              <p className="text-xs text-slate-500">Live modeled share of total theme risk from the current regression.</p>
+            </div>
+            {liveRiskSnapshot.updatedAt && <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-600">Live</span>}
+          </div>
+          {riskContributionRows.length > 0 ? <ResponsiveContainer width="100%" height={320}>
+            <BarChart layout="vertical" data={riskContributionRows} margin={{ left: 12, right: 12 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis type="number" tickFormatter={(value) => fmt.pct(value, 1)} tick={{ fontSize: 11 }} />
+              <YAxis type="category" dataKey="theme" width={92} tick={{ fontSize: 11 }} />
+              <Tooltip content={<CustomTooltip formatter={(value) => fmt.pct(value)} />} />
+              <Bar dataKey="riskContrib" name="Risk Contribution" radius={[0, 4, 4, 0]} onClick={(data) => setSelectedTheme(data?.theme || null)}>
+                {riskContributionRows.map((row) => <Cell key={row.theme} fill={row.fill} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer> : <p className="py-10 text-sm text-slate-500">Risk contribution becomes available after the live regression completes.</p>}
+        </Card>
+
+        <Card className="p-4 border-slate-200 shadow-none">
+          <div className="mb-3">
+            <h4 className="text-sm font-semibold text-slate-700">Factor Exposure / Factor Contribution</h4>
+            <p className="text-xs text-slate-500">Available factors from the live model. Unsupported style factors are hidden instead of guessed.</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50">
+                  {["Factor", "Exposure", "Latest Contribution", "Interpretation"].map((heading) => (
+                    <th key={heading} className="px-2 py-2 text-left font-semibold uppercase tracking-wider text-slate-500">{heading}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {factorExposureRows.map((row) => (
+                  <tr key={row.factor} className="border-b border-slate-100 hover:bg-slate-50">
+                    <td className="px-2 py-2 font-medium text-slate-800">{row.factor}</td>
+                    <td className="px-2 py-2 text-slate-600">{row.factor === "Alpha" ? fmt.pct(row.exposure) : fmt.num(row.exposure, 2)}</td>
+                    <td className={`px-2 py-2 font-medium ${asNumber(row.contribution) >= 0 ? "text-emerald-600" : "text-red-500"}`}>{row.contribution == null ? "—" : fmt.pct(row.contribution, 2)}</td>
+                    <td className="px-2 py-2 text-slate-500">{row.note}</td>
+                  </tr>
+                ))}
+                {!factorExposureRows.length && <tr><td colSpan={4} className="px-2 py-8 text-center text-sm text-slate-500">Factor exposures appear after the live regression finishes.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          {dominantFactor && <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+            Dominant live factor: <span className="font-semibold text-slate-900">{dominantFactor.factor}</span> contributed {fmt.pct(dominantFactor.contribution)} in the latest modeled period.
+          </div>}
+        </Card>
+      </div>
+    </Card>
+
+    <div className="grid gap-4 xl:grid-cols-3">
+      <Card className="p-4">
+        <h4 className="text-sm font-semibold text-slate-700">Concentration &amp; Diversification</h4>
+        <p className="mt-1 text-xs text-slate-500">How tightly the current book is packed into its largest names.</p>
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Holdings</p><p className="mt-1 text-lg font-bold text-slate-800">{concentrationMetrics.activeCount}</p></div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Top 10 Weight</p><p className="mt-1 text-lg font-bold text-slate-800">{fmt.pct(concentrationMetrics.top10Weight, 1)}</p></div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Top 5 Weight</p><p className="mt-1 text-lg font-bold text-slate-800">{fmt.pct(top5Weight, 1)}</p></div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Cash Weight</p><p className="mt-1 text-lg font-bold text-slate-800">{fmt.pct(concentrationMetrics.cashWeight, 1)}</p></div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Largest Position</p><p className="mt-1 text-base font-bold text-slate-800">{concentrationMetrics.largestHolding?.ticker || "—"}</p><p className="text-xs text-slate-500">{concentrationMetrics.largestHolding ? fmt.pct(concentrationMetrics.largestHolding.weight, 1) : "—"}</p></div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">HHI</p><p className="mt-1 text-lg font-bold text-slate-800">{fmt.num(concentrationMetrics.hhi, 4)}</p><p className="text-xs text-slate-500">Turnover unavailable</p></div>
+        </div>
+      </Card>
+
+      <Card className="p-4">
+        <h4 className="text-sm font-semibold text-slate-700">Exposure Breakdown</h4>
+        <p className="mt-1 text-xs text-slate-500">Theme-level weights and active weights. Sector, region, and market-cap breakdowns are hidden because the current dataset does not include them.</p>
+        <div className="mt-4 max-h-[24rem] overflow-auto rounded-xl border border-slate-200">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-white">
+              <tr className="border-b border-slate-200 bg-slate-50">
+                {["Theme", "Weight", "Active Wt", "Benchmark Wt", "Holdings"].map((heading) => (
+                  <th key={heading} className="px-3 py-2 text-left font-semibold uppercase tracking-wider text-slate-500">{heading}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {themeAttributionRows.map((row) => (
+                <tr key={row.theme} className="border-b border-slate-100 hover:bg-slate-50">
+                  <td className="px-3 py-2"><button type="button" onClick={() => setSelectedTheme(row.theme)}><ThemeBadge theme={row.theme} /></button></td>
+                  <td className="px-3 py-2 text-slate-600">{fmt.pct(row.portfolioWeight, 1)}</td>
+                  <td className={`px-3 py-2 font-medium ${row.activeWeight >= 0 ? "text-emerald-600" : "text-red-500"}`}>{fmt.pct(row.activeWeight, 1)}</td>
+                  <td className="px-3 py-2 text-slate-500">{fmt.pct(row.benchmarkWeightEstimate, 1)}</td>
+                  <td className="px-3 py-2 text-slate-500">{row.holdings}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card className="p-4">
+        <h4 className="text-sm font-semibold text-slate-700">Risk Diagnostics</h4>
+        <p className="mt-1 text-xs text-slate-500">Live risk where available, with range-based downside and drawdown context alongside it.</p>
+        <div className="mt-4 space-y-3">
+          {[
+            ["Annualized Volatility", fmt.pct(liveVolatility), liveRiskMetrics ? "Live risk model" : selectedRangeLabel],
+            ["Downside Deviation", fmt.pct(rangeStats.downsideDeviation), selectedRangeLabel],
+            ["Beta", liveBeta == null ? "—" : fmt.num(liveBeta, 2), liveRiskSnapshot.betaStatus],
+            ["Alpha", rangeStats.alpha == null ? "—" : fmt.pct(rangeStats.alpha), selectedRangeLabel],
+            ["Tracking Error", fmt.pct(liveTrackingError), liveRiskSnapshot.trackingErrorStatus],
+            ["Correlation", rangeStats.correlationToBenchmark == null ? "—" : fmt.num(rangeStats.correlationToBenchmark, 2), selectedRangeLabel],
+            ["Max Drawdown", fmt.pct(rangeStats.maxDrawdown), selectedRangeLabel],
+            ["Daily VaR 95%", liveRiskMetrics?.dailyVaR95 == null ? "—" : fmt.pct(liveRiskMetrics.dailyVaR95), "Live risk model"],
+            ["Sortino Ratio", rangeStats.sortinoRatio == null ? "—" : fmt.num(rangeStats.sortinoRatio, 2), selectedRangeLabel],
+          ].map(([label, value, context]) => (
+            <div key={label} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+              <div>
+                <p className="text-sm font-medium text-slate-700">{label}</p>
+                <p className="text-[11px] text-slate-500">{context}</p>
+              </div>
+              <p className="text-sm font-semibold text-slate-900">{value}</p>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+
+    <HoldingsOverviewTable
+      rows={holdingsOverviewRows}
+      search={holdingSearch}
+      setSearch={setHoldingSearch}
+      sortKey={holdingSortKey}
+      sortDir={holdingSortDir}
+      onSort={handleHoldingSort}
+      selectedTheme={selectedTheme}
+      clearTheme={() => setSelectedTheme(null)}
+    />
   </div>;
 }
 
