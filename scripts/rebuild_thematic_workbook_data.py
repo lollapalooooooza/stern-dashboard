@@ -1017,7 +1017,9 @@ def main():
 
     if balance_rows:
         spy_start_date = min(balance_rows[0]["date"], reference_date)
-        spy_rows = download_spy_history(spy_start_date, TRACKER_DATE_CUTOFF.isoformat())
+        latest_balance_date = balance_rows[-1]["date"]
+        spy_end_date = (date.fromisoformat(max(latest_balance_date, snapshot_date)) + timedelta(days=3)).isoformat()
+        spy_rows = download_spy_history(spy_start_date, spy_end_date)
         if reference_date not in spy_rows:
             raise ValueError(f"Missing SPY close for {reference_date}")
         if valuation_date not in spy_rows:

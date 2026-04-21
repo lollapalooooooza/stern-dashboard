@@ -3162,7 +3162,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
           value={fmt.usdExact(liveBookSnapshot.nav)}
           sub={`Stocks ${fmt.usd(liveBookSnapshot.stockValue)} · Benchmark ${fmt.usd(liveBookSnapshot.benchmarkValue)}`}
           delta={liveBookSnapshot.dayPnl == null ? null : `${liveBookSnapshot.dayPnl >= 0 ? "+" : ""}${fmt.usdExact(liveBookSnapshot.dayPnl)} day move`}
-          sparklineData={navSparkline}
           icon={DollarSign}
           detail={overviewDetails.portfolioNav}
           footerLabel={lastPriceUpdate ? "Live" : ""}
@@ -3174,7 +3173,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
           trend={rangeStats.totalReturn >= 0 ? "up" : "down"}
           color={rangeStats.totalReturn >= 0 ? "text-emerald-700" : "text-red-600"}
           delta={previousRangeStats ? formatComparableDelta(rangeStats.totalReturn, previousRangeStats.totalReturn, (value) => fmt.pct(value, 1)) : null}
-          sparklineData={totalReturnSparkline}
           icon={TrendingUp}
           detail={selectedRangeDetails.totalReturn}
           footerLabel={selectedRangeLabel}
@@ -3186,8 +3184,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
           trend={rangeStats.activeReturn >= 0 ? "up" : "down"}
           color={rangeStats.activeReturn >= 0 ? "text-emerald-700" : "text-red-600"}
           delta={previousRangeStats ? formatComparableDelta(rangeStats.activeReturn, previousRangeStats.activeReturn, (value) => fmt.pct(value, 1)) : null}
-          sparklineData={activeReturnSparkline}
-          sparklineColor="#059669"
           icon={ArrowRightLeft}
           detail={selectedRangeDetails.activeReturn}
           footerLabel={selectedRangeLabel}
@@ -3196,7 +3192,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
           label="Annualized Volatility"
           value={fmt.pct(liveVolatility)}
           sub={`Downside ${fmt.pct(rangeStats.downsideDeviation)}`}
-          sparklineData={annualizedVolSparkline}
           icon={Activity}
           tooltip={"Annualized volatility measures the standard deviation of portfolio returns scaled by sqrt(252). Lower is better only if return is held constant. This card uses the live risk model when available and falls back to the selected history range otherwise."}
           footerLabel={liveRiskMetrics ? "Live risk" : selectedRangeLabel}
@@ -3208,7 +3203,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
           trend={rangeStats.sharpeRatio == null ? undefined : (rangeStats.sharpeRatio >= 0 ? "up" : "down")}
           color={rangeStats.sharpeRatio == null ? "text-slate-800" : (rangeStats.sharpeRatio >= 0 ? "text-emerald-700" : "text-red-600")}
           delta={previousRangeStats && previousRangeStats.sharpeRatio != null ? formatComparableDelta(rangeStats.sharpeRatio ?? 0, previousRangeStats.sharpeRatio, (value) => fmt.num(value, 2)) : null}
-          sparklineData={sharpeSparkline}
           icon={BarChart3}
           tooltip={"Sharpe ratio = (annualized return - risk free rate) / annualized volatility. It answers how efficiently the fund converted risk into absolute return over the selected range."}
           footerLabel={selectedRangeLabel}
@@ -3220,7 +3214,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
           trend={rangeStats.informationRatio == null ? undefined : (rangeStats.informationRatio >= 0 ? "up" : "down")}
           color={rangeStats.informationRatio == null ? "text-slate-800" : (rangeStats.informationRatio >= 0 ? "text-emerald-700" : "text-red-600")}
           delta={previousRangeStats && previousRangeStats.informationRatio != null ? formatComparableDelta(rangeStats.informationRatio ?? 0, previousRangeStats.informationRatio, (value) => fmt.num(value, 2)) : null}
-          sparklineData={infoRatioSparkline}
           icon={BarChart3}
           tooltip={"Information ratio = annualized active return / tracking error. It shows whether benchmark-relative outperformance is coming from repeatable skill or from taking more active risk."}
           footerLabel={selectedRangeLabel}
@@ -3232,8 +3225,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
           trend={rangeStats.maxDrawdown >= 0 ? "up" : "down"}
           color={rangeStats.maxDrawdown >= 0 ? "text-emerald-700" : "text-red-600"}
           delta={previousRangeStats ? formatComparableDelta(rangeStats.maxDrawdown, previousRangeStats.maxDrawdown, (value) => fmt.pct(value, 1)) : null}
-          sparklineData={maxDrawdownSparkline}
-          sparklineColor="#dc2626"
           icon={AlertTriangle}
           detail={selectedRangeDetails.maxDrawdown}
           footerLabel={selectedRangeLabel}
@@ -3242,7 +3233,6 @@ function OverviewPage({ holdings, settings, weeklyHistory, dailyHistory, risk, l
           label="Tracking Error"
           value={fmt.pct(liveTrackingError)}
           sub={liveRiskSnapshot.trackingErrorStatus}
-          sparklineData={trackingErrorSparkline}
           icon={Activity}
           detail={liveRiskSnapshot.details?.trackingError || overviewDetails.trackingError}
           footerLabel="Live risk"
